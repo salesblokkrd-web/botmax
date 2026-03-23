@@ -612,12 +612,14 @@ def finalize(chat_id: int):
 
 # ─── Обработка сообщений ──────────────────────────────────────────────────
 
-def handle_message(chat_id: int, text: str, user_name: str = ""):
+def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = None):
     global MANAGER_CHAT_ID, OWNER_CHAT_ID
+    if user_id is None:
+        user_id = chat_id
 
-    # Ответ менеджера клиенту (приоритет над всем)
-    if chat_id in pending_replies:
-        client_id = pending_replies.pop(chat_id)
+    # Ответ менеджера клиенту (приоритет над всем) — проверяем по user_id
+    if user_id in pending_replies:
+        client_id = pending_replies.pop(user_id)
         try:
             send_msg(client_id, f"Ответ менеджера:\n\n{text}")
             send_msg(chat_id, "Ответ отправлен клиенту.")
@@ -807,10 +809,10 @@ def handle_message(chat_id: int, text: str, user_name: str = ""):
 
 def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
     global processed_callbacks
-    answer_cb(callback_id)
     # Игнорируем повторные нажатия одной и той же кнопки
     if callback_id in processed_callbacks:
-        print(f"[CB] Дубль проигнорирован: {callback_id}", flush=True)
+        answer_cb(callback_id)
+        print(f"[CB] Дубль проигнорирован: {callback_id[:20]}", flush=True)
         return
     processed_callbacks.add(callback_id)
     if len(processed_callbacks) > 2000:
@@ -819,15 +821,22 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
     if payload.startswith("reply_"):
         try:
             client_id = int(payload.split("_")[1])
-            pending_replies[user_id] = client_id
+            pending_replies[user_id] = client_id  # ключ — user_id менеджера
             print(f"[REPLY] Менеджер {user_id} нажал ответить клиенту {client_id}")
-            send_msg(user_id, "Напишите ответ — я перешлю клиенту:")
+            # Пробуем отправить сообщение; если нет диалога — показываем уведомление
+            result = send_msg(chat_id, "Напишите ответ — я перешлю клиенту:")
+            if not result.get("message"):
+                answer_cb(callback_id, "Напишите следующий ответ — он будет переслан клиенту")
+            else:
+                answer_cb(callback_id)
         except Exception as e:
             print(f"[REPLY] Ошибка: {e}")
+            answer_cb(callback_id, "Напишите следующий ответ — он будет переслан клиенту")
         return
 
+    answer_cb(callback_id)
     # Кнопки-варианты (продукт, доставка) — обрабатываем как текст
-    handle_message(chat_id, payload)
+    handle_message(chat_id, payload, user_id=user_id)
 
 
 def process_update(update: dict):
@@ -866,7 +875,7 @@ def process_update(update: dict):
                 return
 
         if text:
-            handle_message(chat_id, text, user_name)
+            handle_message(chat_id, text, user_name, user_id=user_id)
 
     elif utype == "message_callback":
         cb = update.get("callback", {})
