@@ -279,12 +279,14 @@ def get_coords(address: str):
     def in_russia(loc):
         return 40.0 <= loc.latitude <= 80.0 and 25.0 <= loc.longitude <= 180.0
 
+    # Полный адрес + Краснодарский край — сначала, чтобы не попасть в другой регион
     queries = [
-        f"{city_only}, Россия",
-        f"{city_candidate}, Россия",
-        f"{city_only}, Краснодарский край, Россия",
-        f"{city_candidate}, Краснодарский край, Россия",
+        f"{address}, Краснодарский край, Россия",
         f"{address}, Россия",
+        f"{city_candidate}, Краснодарский край, Россия",
+        f"{city_only}, Краснодарский край, Россия",
+        f"{city_candidate}, Россия",
+        f"{city_only}, Россия",
         city_candidate,
     ]
     for query in queries:
@@ -346,8 +348,24 @@ def transcribe_voice_url(audio_url: str):
         req = urllib.request.Request(audio_url, headers={"User-Agent": "quarry-max-bot/1.0"})
         with urllib.request.urlopen(req, timeout=30) as r:
             audio_data = r.read()
+            content_type = r.headers.get("Content-Type", "")
+        # Определяем расширение из URL, затем из Content-Type
+        parsed_path = urllib.parse.urlparse(audio_url).path
+        ext = os.path.splitext(parsed_path)[1].lower()
+        if not ext:
+            if "ogg" in content_type or "opus" in content_type:
+                ext = ".ogg"
+            elif "mp3" in content_type or "mpeg" in content_type:
+                ext = ".mp3"
+            elif "mp4" in content_type or "m4a" in content_type:
+                ext = ".mp4"
+            elif "wav" in content_type:
+                ext = ".wav"
+            else:
+                ext = ".ogg"
+        print(f"[VOICE] Загружено {len(audio_data)} байт, ext={ext}, content_type={content_type}", flush=True)
         result = Groq(api_key=GROQ_API_KEY).audio.transcriptions.create(
-            file=("voice.ogg", audio_data),
+            file=(f"voice{ext}", audio_data),
             model="whisper-large-v3",
             language="ru",
         )
