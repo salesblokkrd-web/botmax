@@ -1,0 +1,10 @@
+meta:
+  environment: python
+  toolchain:
+    name: pip
+    version: 3.11
+build:
+  requirementsPath: requirements.txt
+  useCache: true
+run:
+  command: python -u bot.py

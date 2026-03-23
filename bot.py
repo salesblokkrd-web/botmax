@@ -1,0 +1,902 @@
+import sys
+import re
+import os
+import json
+import time
+import math
+import urllib.request
+import urllib.parse
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+from groq import Groq
+from pydantic import BaseModel
+from typing import Optional, List
+
+# ─── Конфиг ───────────────────────────────────────────────────────────────
+
+TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+
+MANAGER_ID_FILE = "manager_id.txt"
+OWNER_ID_FILE = "owner_id.txt"
+
+def _load_id(filepath):
+    try:
+        with open(filepath) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+_manager_from_env = os.environ.get("MANAGER_CHAT_ID")
+MANAGER_CHAT_ID = int(_manager_from_env) if _manager_from_env else _load_id(MANAGER_ID_FILE)
+
+_owner_from_env = os.environ.get("OWNER_CHAT_ID")
+OWNER_CHAT_ID = int(_owner_from_env) if _owner_from_env else _load_id(OWNER_ID_FILE)
+
+YANDEX_ROUTING_KEY = os.environ.get("YANDEX_ROUTING_KEY", "")
+BASE_COORDS = (44.992753, 39.838747)
+BASE_NAME = "Архиповский карьер (с. Архиповское, Белореченский р-н)"
+RATE_PER_TON_KM = 5
+WORK_HOURS = "пн–сб 8:00–18:00"
+
+PRODUCTS = {
+    "Отсев 0-5":             614,
+    "Щебень 5-20":           345,
+    "Щебень 20-40":          None,
+    "Щебень 40-70":          None,
+    "Песок мелкозернистый":  233,
+    "Песок крупнозернистый": 566,
+    "Гравий":                240,
+    "ГПС плохой":            75,
+    "ГПС хороший":           160,
+}
+
+PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY = range(6)
+
+# State machine (вместо ConversationHandler из PTB)
+user_state: dict = {}   # chat_id -> int (состояние)
+user_data: dict = {}    # chat_id -> dict (данные заявки)
+pending_replies: dict = {}  # manager_id -> client_id
+
+# ─── Max Bot API ───────────────────────────────────────────────────────────
+
+BASE_URL = "https://botapi.max.ru"
+
+
+def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> dict:
+    p = dict(params or {})
+    p["access_token"] = TOKEN
+    url = f"{BASE_URL}/{endpoint}?{urllib.parse.urlencode(p)}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if data:
+        req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "quarry-max-bot/1.0")
+    try:
+        with urllib.request.urlopen(req, timeout=35) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        print(f"[API] {method} /{endpoint} HTTP {e.code}: {e.read()[:300]}", flush=True)
+        return {}
+    except Exception as e:
+        print(f"[API] {method} /{endpoint} error: {e}", flush=True)
+        return {}
+
+
+def send_msg(chat_id: int, text: str, buttons=None) -> dict:
+    """Отправить сообщение. buttons = [[{text, payload}, ...], ...] или None."""
+    body = {"text": text}
+    if buttons:
+        body["attachments"] = [{
+            "type": "inline_keyboard",
+            "payload": {"buttons": buttons}
+        }]
+    return _api("POST", "messages", params={"chat_id": chat_id}, body=body)
+
+
+def send_photo_msg(chat_id: int, photo_url: str, caption: str = "") -> dict:
+    """Отправить изображение по URL."""
+    body = {
+        "text": caption,
+        "attachments": [{"type": "image", "payload": {"url": photo_url}}]
+    }
+    return _api("POST", "messages", params={"chat_id": chat_id}, body=body)
+
+
+def answer_cb(callback_id: str, notification: str = "") -> dict:
+    return _api("POST", "answers", body={"callback_id": callback_id, "notification": notification})
+
+
+def get_updates(marker=None, timeout: int = 30) -> dict:
+    p = {"timeout": timeout}
+    if marker is not None:
+        p["marker"] = marker
+    return _api("GET", "updates", params=p)
+
+
+def make_buttons(items: list) -> list:
+    """Список строк → список рядов кнопок (одна кнопка в ряд)."""
+    return [[{"type": "callback", "text": s, "payload": s}] for s in items]
+
+
+# ─── Pydantic модели ───────────────────────────────────────────────────────
+
+class OrderItem(BaseModel):
+    product: Optional[str] = None
+    tons: Optional[float] = None
+
+class OrderParsed(BaseModel):
+    items: Optional[List[OrderItem]] = None
+    product: Optional[str] = None
+    tons: Optional[float] = None
+    delivery: Optional[str] = None
+    address: Optional[str] = None
+
+class ContactsParsed(BaseModel):
+    name: Optional[str] = None
+    company: Optional[str] = None
+    phone: Optional[str] = None
+
+
+# ─── Парсеры (идентично tg-bot) ───────────────────────────────────────────
+
+def parse_order_regex(text: str) -> OrderParsed:
+    t = text.lower()
+    t_norm = re.sub(r'(\d)[./](\d)', r'\1-\2', t)
+    result = OrderParsed()
+    for product in PRODUCTS:
+        if product.lower() in t_norm:
+            result.product = product
+            break
+    if not result.product:
+        patterns = [
+            (r'щебень.*?5-20|5-20.*?щебень|\b5-20\b', "Щебень 5-20"),
+            (r'щебень.*?20-40|20-40.*?щебень|\b20-40\b', "Щебень 20-40"),
+            (r'щебень.*?40-70|40-70.*?щебень|\b40-70\b', "Щебень 40-70"),
+            (r'\bотсев\b', "Отсев 0-5"),
+            (r'гравий', "Гравий"),
+            (r'гпс.*?плох|плох.*?гпс', "ГПС плохой"),
+            (r'гпс.*?хор|хор.*?гпс', "ГПС хороший"),
+            (r'\bгпс\b', "ГПС хороший"),
+            (r'песок.*?мелк|мелк.*?песок', "Песок мелкозернистый"),
+            (r'песок.*?круп|круп.*?песок', "Песок крупнозернистый"),
+            (r'\bпесок\b', "Песок мелкозернистый"),
+            (r'\bщебень\b', "Щебень 5-20"),
+        ]
+        for pat, name in patterns:
+            if re.search(pat, t_norm):
+                result.product = name
+                break
+    m_frac = re.search(r'(\d+)[- ](\d+)[- ](\d+)', t_norm)
+    if m_frac and not result.product:
+        frac = f"{m_frac.group(2)}-{m_frac.group(3)}"
+        for pat, name in [("5-20", "Щебень 5-20"), ("20-40", "Щебень 20-40"), ("40-70", "Щебень 40-70")]:
+            if frac == pat:
+                result.product = name
+                if not result.tons:
+                    result.tons = float(m_frac.group(1))
+                break
+    m = re.search(r'(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|кубо\w*|м[³3])', t)
+    if m:
+        result.tons = float(m.group(1).replace(",", "."))
+    if any(w in t for w in ["доставк", "привез", "привоз", "доставьте", "привезти", "доставить"]):
+        result.delivery = "Доставка"
+    elif any(w in t for w in ["самовывоз", "заберу", "сам заберу"]):
+        result.delivery = "Самовывоз"
+    if result.delivery == "Доставка":
+        m = re.search(r'(?:по адресу|доставить в|привезти в|доставку в|в\s+г[.\s]|в\s+город|в\s+)(.{5,60}?)(?:\s*\d+\s*тонн|\s*,\s*\d|\s*$)', t)
+        if m:
+            result.address = m.group(1).strip()
+    return result
+
+
+def parse_order_groq(text: str) -> OrderParsed:
+    products_list = ", ".join(PRODUCTS.keys())
+    client = Groq(api_key=GROQ_API_KEY)
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "Ты помощник для парсинга заявок клиентов карьера. Отвечай ТОЛЬКО валидным JSON без пояснений и markdown."},
+            {"role": "user", "content": (
+                f"Доступные товары: {products_list}\n\n"
+                f"Сообщение клиента: «{text}»\n\n"
+                "ВАЖНО: фракция щебня — два числа через дефис (5-20, 20-40, 40-70). "
+                "Если клиент пишет '7 5-20' — это 7 тонн щебня 5-20. "
+                "КРИТИЧНО: 520, 2040, 4070 — это НЕ тоннаж, это фракции слитно.\n\n"
+                "Верни JSON:\n"
+                "- items: [{\"product\": точное название или null, \"tons\": число или null}]\n"
+                "- delivery: «Доставка» или «Самовывоз» или null\n"
+                "- address: адрес или null\n"
+                "Пример: {\"items\": [{\"product\": \"Щебень 5-20\", \"tons\": 7}], \"delivery\": \"Доставка\", \"address\": \"Краснодар\"}"
+            )},
+        ],
+        temperature=0,
+        max_tokens=200,
+    )
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"```[a-z]*\n?", "", raw).strip("` \n")
+    data = json.loads(raw)
+    FRACTION_ARTIFACTS = {520, 2040, 4070, 520.0, 2040.0, 4070.0}
+    items = []
+    for it in (data.get("items") or []):
+        t = float(it["tons"]) if it.get("tons") else None
+        if t in FRACTION_ARTIFACTS:
+            t = None
+        items.append(OrderItem(product=it.get("product"), tons=t))
+    first = items[0] if items else OrderItem()
+    return OrderParsed(
+        items=items if items else None,
+        product=first.product,
+        tons=first.tons,
+        delivery=data.get("delivery"),
+        address=data.get("address"),
+    )
+
+
+def parse_order(text: str) -> OrderParsed:
+    if GROQ_API_KEY:
+        try:
+            return parse_order_groq(text)
+        except Exception as e:
+            print(f"[GROQ] parse failed: {e}, using regex")
+    return parse_order_regex(text)
+
+
+def parse_contacts_groq(text: str) -> ContactsParsed:
+    client = Groq(api_key=GROQ_API_KEY)
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "Ты помощник для извлечения контактных данных. Отвечай ТОЛЬКО валидным JSON без пояснений."},
+            {"role": "user", "content": (
+                f"Сообщение: «{text}»\n\n"
+                "Верни JSON: {\"name\": str|null, \"company\": str|null, \"phone\": str|null}"
+            )},
+        ],
+        temperature=0,
+        max_tokens=100,
+    )
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"```[a-z]*\n?", "", raw).strip("` \n")
+    data = json.loads(raw)
+    return ContactsParsed(name=data.get("name"), company=data.get("company"), phone=data.get("phone"))
+
+
+# ─── Геокодирование и маршрутизация (идентично tg-bot) ───────────────────
+
+def get_coords(address: str):
+    from geopy.geocoders import Nominatim
+    geolocator = Nominatim(user_agent="quarry_delivery_bot_krd", timeout=10)
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    city_candidate = parts[0] if parts else address
+    city_only = city_candidate.split()[0] if city_candidate.split() else city_candidate
+
+    def in_russia(loc):
+        return 40.0 <= loc.latitude <= 80.0 and 25.0 <= loc.longitude <= 180.0
+
+    queries = [
+        f"{city_only}, Россия",
+        f"{city_candidate}, Россия",
+        f"{city_only}, Краснодарский край, Россия",
+        f"{city_candidate}, Краснодарский край, Россия",
+        f"{address}, Россия",
+        city_candidate,
+    ]
+    for query in queries:
+        try:
+            loc = geolocator.geocode(query)
+            if loc and in_russia(loc):
+                print(f"[GEOCODE] OK: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})")
+                return (loc.latitude, loc.longitude)
+        except Exception as e:
+            print(f"[GEOCODE] ошибка: {e}")
+    print(f"[GEOCODE] ERR не найдено: {address!r}")
+    return None
+
+
+def get_road_distance(origin, destination):
+    if YANDEX_ROUTING_KEY:
+        params = urllib.parse.urlencode({
+            "apikey": YANDEX_ROUTING_KEY,
+            "waypoints": f"{origin[0]},{origin[1]}|{destination[0]},{destination[1]}",
+            "vehicle_type": "truck",
+            "route_type": "shortest",
+        })
+        try:
+            req = urllib.request.Request(
+                f"https://api.routing.yandex.net/v2/route?{params}",
+                headers={"User-Agent": "quarry-bot/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            total_m = sum(leg.get("distance", 0) for leg in data["route"]["legs"])
+            if total_m:
+                return round(total_m / 1000, 1)
+        except Exception as e:
+            print(f"[ROUTING] Яндекс ошибка: {e}")
+    try:
+        url = (
+            f"http://router.project-osrm.org/route/v1/driving/"
+            f"{origin[1]},{origin[0]};{destination[1]},{destination[0]}?overview=false"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "quarry-bot/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        if data.get("code") == "Ok":
+            return round(data["routes"][0]["distance"] / 1000, 1)
+    except Exception as e:
+        print(f"[ROUTING] OSRM ошибка: {e}")
+    return None
+
+
+def parse_tons(text: str):
+    m = re.search(r"(\d+[.,]?\d*)", text)
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+# ─── Голосовые сообщения ──────────────────────────────────────────────────
+
+def transcribe_voice_url(audio_url: str):
+    try:
+        req = urllib.request.Request(audio_url, headers={"User-Agent": "quarry-max-bot/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            audio_data = r.read()
+        result = Groq(api_key=GROQ_API_KEY).audio.transcriptions.create(
+            file=("voice.ogg", audio_data),
+            model="whisper-large-v3",
+            language="ru",
+        )
+        return result.text.strip()
+    except Exception as e:
+        print(f"[VOICE] ошибка расшифровки: {e}", flush=True)
+        return None
+
+
+# ─── Логика диалога ────────────────────────────────────────────────────────
+
+def try_parse_freeform(text: str, chat_id: int) -> bool:
+    parsed = parse_order(text)
+    found = False
+    d = user_data[chat_id]
+
+    if parsed.items and not d.get("items"):
+        valid_items = [
+            {"product": it.product, "tons": it.tons, "price_per_ton": PRODUCTS.get(it.product)}
+            for it in parsed.items if it.product and it.tons and it.tons > 0
+        ]
+        if len(valid_items) > 1:
+            d["items"] = valid_items
+            d["product"] = ", ".join(i["product"] for i in valid_items)
+            d["tons"] = sum(i["tons"] for i in valid_items)
+            d["volume_text"] = " + ".join(f"{i['tons']}т {i['product']}" for i in valid_items)
+            found = True
+        elif len(valid_items) == 1:
+            it = valid_items[0]
+            if not d.get("product"):
+                d["product"] = it["product"]
+                d["price_per_ton"] = it["price_per_ton"]
+                found = True
+            if not d.get("tons"):
+                d["tons"] = it["tons"]
+                d["volume_text"] = f"{it['tons']} т"
+                found = True
+    elif parsed.product and parsed.product in PRODUCTS and not d.get("product"):
+        d["product"] = parsed.product
+        d["price_per_ton"] = PRODUCTS[parsed.product]
+        found = True
+    if parsed.tons and parsed.tons > 0 and not d.get("tons"):
+        d["tons"] = parsed.tons
+        d["volume_text"] = f"{parsed.tons} т"
+        found = True
+    if parsed.delivery and not d.get("delivery"):
+        d["delivery"] = parsed.delivery
+        found = True
+    if parsed.address and not d.get("address"):
+        d["address"] = parsed.address
+        found = True
+    if GROQ_API_KEY and not (d.get("contact_name") and d.get("phone")):
+        try:
+            contacts = parse_contacts_groq(text)
+            if contacts.name and not d.get("contact_name"):
+                d["contact_name"] = contacts.name
+                found = True
+            if contacts.company and not d.get("company"):
+                d["company"] = contacts.company
+                found = True
+            if contacts.phone and not d.get("phone"):
+                d["phone"] = contacts.phone
+                found = True
+        except Exception:
+            pass
+    return found
+
+
+def advance(chat_id: int) -> int:
+    """Определяет следующий шаг диалога. Возвращает состояние или -1 (конец)."""
+    d = user_data.get(chat_id, {})
+
+    if not d.get("product"):
+        btns = make_buttons(list(PRODUCTS.keys()))
+        send_msg(chat_id, "С чем поможем? Выберите продукцию или напишите своё название:", btns)
+        return PRODUCT
+
+    if not d.get("tons"):
+        send_msg(chat_id, f"Сколько тонн {d['product']} вам нужно?\n\nНапример: 30 тонн")
+        return VOLUME
+
+    if not d.get("delivery"):
+        btns = [[
+            {"type": "callback", "text": "Самовывоз", "payload": "Самовывоз"},
+            {"type": "callback", "text": "Доставка", "payload": "Доставка"}
+        ]]
+        send_msg(chat_id,
+            "Как удобнее получить заказ?\n\nМинимальный объём для доставки — 30 тонн (20 кубов).",
+            btns)
+        return DELIVERY
+
+    if d.get("delivery") == "Доставка":
+        tons = d.get("tons", 0)
+        if tons < 30:
+            d.pop("delivery", None)
+            btns = [[
+                {"type": "callback", "text": "Самовывоз", "payload": "Самовывоз"},
+                {"type": "callback", "text": "Доставка", "payload": "Доставка"}
+            ]]
+            send_msg(chat_id,
+                f"Доставка возможна от 30 тонн — минимальная загрузка машины.\n\n"
+                f"Вы указали {tons} т. Заберёте самовывозом или скорректируем объём?",
+                btns)
+            return DELIVERY
+        if not d.get("address"):
+            send_msg(chat_id, "Куда доставить? Укажите адрес (город, улица, дом) — рассчитаем стоимость.")
+            return ADDRESS
+
+    if not d.get("phone"):
+        ca = d.get("contacts_asked")
+        if not ca:
+            d["contacts_asked"] = True
+            send_msg(chat_id,
+                "Почти готово! Осталось оставить контакты:\n\n"
+                "Напишите имя, организацию (если есть) и номер телефона.")
+            return CONTACTS
+        else:
+            d["contacts_asked"] = "phone_only"
+            send_msg(chat_id, "Последний шаг — подскажите номер телефона, и заявка готова.")
+            return PHONE_ONLY
+
+    finalize(chat_id)
+    user_state.pop(chat_id, None)
+    user_data.pop(chat_id, None)
+    return -1
+
+
+def finalize(chat_id: int):
+    global MANAGER_CHAT_ID, OWNER_CHAT_ID
+    d = user_data.get(chat_id, {})
+    product       = d.get("product")
+    volume_text   = d.get("volume_text")
+    tons          = d.get("tons")
+    delivery      = d.get("delivery")
+    address       = d.get("address", "—")
+    price_per_ton = d.get("price_per_ton")
+    contact_name  = d.get("contact_name", "—")
+    company       = d.get("company", "—")
+    phone         = d.get("phone")
+    items         = d.get("items")
+
+    MAX_TRUCK = 30
+    trucks = math.ceil(tons / MAX_TRUCK) if tons and tons > 0 else 1
+    material_cost = round(tons * price_per_ton) if price_per_ton and not items else None
+    if items:
+        material_cost = sum(
+            round(i["tons"] * i["price_per_ton"]) for i in items if i.get("price_per_ton")
+        ) or None
+
+    distance_km = None
+    delivery_cost = None
+    geocode_failed = False
+    map_url = None
+
+    if delivery == "Доставка":
+        coords = get_coords(address)
+        if coords:
+            distance_km = get_road_distance(BASE_COORDS, coords)
+            if distance_km is None:
+                from geopy.distance import geodesic
+                distance_km = round(geodesic(BASE_COORDS, coords).km * 1.3, 1)
+            delivery_cost = round(distance_km * tons * RATE_PER_TON_KM)
+            map_url = (
+                f"https://static-maps.yandex.ru/1.x/?l=map&lang=ru_RU&size=600,400"
+                f"&pt={BASE_COORDS[1]},{BASE_COORDS[0]},pm2rdm"
+                f"~{coords[1]},{coords[0]},pm2blm"
+            )
+        else:
+            geocode_failed = True
+
+    # ── Клиенту ────────────────────────────────────────────────────────────
+    lines = ["Заявка принята! Передаём менеджеру.\n"]
+    if items:
+        for i in items:
+            lines.append(f"Товар: {i['product']} — {i['tons']} т")
+        lines.append(f"Итого: {tons} т")
+    else:
+        lines += [f"Товар: {product}", f"Объём: {volume_text}"]
+    if trucks > 1:
+        lines.append(f"Количество рейсов: {trucks} (по {MAX_TRUCK} т)")
+    lines.append(f"Способ получения: {delivery}")
+    if delivery == "Доставка":
+        lines.append(f"Адрес: {address}")
+    lines.append("")
+    if material_cost is not None:
+        lines.append(f"Стоимость материала: ~{material_cost:,} руб.".replace(",", " "))
+    else:
+        lines.append("Стоимость материала: уточнит менеджер")
+    if delivery == "Доставка":
+        if distance_km is not None:
+            lines.append(f"Стоимость доставки: ~{delivery_cost:,} руб. (~{distance_km} км)".replace(",", " "))
+            if material_cost is not None:
+                lines.append(f"Итого: ~{material_cost + delivery_cost:,} руб.".replace(",", " "))
+        else:
+            lines.append("Стоимость доставки: уточнит менеджер")
+    lines += [
+        "",
+        "Расчёт предварительный — точную стоимость подтвердит менеджер при звонке.",
+        "",
+        f"Ожидайте звонка на номер {phone}",
+        f"Рабочие часы: {WORK_HOURS}",
+        "",
+        "Благодарим, что выбрали Архиповский карьер!",
+        "Для новой заявки напишите /start",
+    ]
+    send_msg(chat_id, "\n".join(lines))
+    if map_url:
+        try:
+            send_photo_msg(chat_id, map_url, f"Маршрут: {BASE_NAME} -> {address} (~{distance_km} км)")
+        except Exception as e:
+            print(f"[MAP] Ошибка карты клиенту: {e}")
+
+    # ── Менеджеру ──────────────────────────────────────────────────────────
+    if not MANAGER_CHAT_ID:
+        print("[WARN] MANAGER_CHAT_ID не задан. Установите через /myid")
+        return
+
+    mgr = [
+        "НОВАЯ ЗАЯВКА\n",
+        f"Клиент: {contact_name}",
+        f"Компания: {company}",
+        f"Телефон: {phone}",
+        "",
+    ]
+    if items:
+        for i in items:
+            mgr.append(f"{i['product']}: {i['tons']} т")
+        mgr.append(f"Итого: {tons} т")
+    else:
+        mgr += [f"Товар: {product}", f"Объём: {volume_text}"]
+    if trucks > 1:
+        mgr.append(f"Рейсов: {trucks} (по {MAX_TRUCK} т)")
+    mgr.append(f"Получение: {delivery}")
+    if delivery == "Доставка":
+        mgr.append(f"Адрес: {address}")
+        if distance_km is not None:
+            mgr.append(f"~{distance_km} км -> доставка ~{delivery_cost:,} руб.".replace(",", " "))
+        elif geocode_failed:
+            mgr.append("Расстояние: уточнить вручную")
+    if material_cost is not None:
+        mgr.append(f"Материал (предв.): ~{material_cost:,} руб. ({price_per_ton} руб/т)".replace(",", " "))
+    mgr.append(f"\nMax ID клиента: {chat_id}")
+
+    reply_btn = [[{"type": "callback", "text": "Ответить клиенту", "payload": f"reply_{chat_id}"}]]
+    send_msg(MANAGER_CHAT_ID, "\n".join(mgr), reply_btn)
+    if map_url:
+        try:
+            send_photo_msg(MANAGER_CHAT_ID, map_url, f"Маршрут: {BASE_NAME} -> {address} (~{distance_km} км)")
+        except Exception as e:
+            print(f"[MAP] Ошибка карты менеджеру: {e}")
+
+    # ── Владельцу (копия без кнопки ответа) ────────────────────────────────
+    if OWNER_CHAT_ID and OWNER_CHAT_ID != MANAGER_CHAT_ID:
+        owner_msg = "[Копия] " + "\n".join(mgr)
+        send_msg(OWNER_CHAT_ID, owner_msg)
+        if map_url:
+            try:
+                send_photo_msg(OWNER_CHAT_ID, map_url, f"Маршрут: {BASE_NAME} -> {address} (~{distance_km} км)")
+            except Exception as e:
+                print(f"[MAP] Ошибка карты владельцу: {e}")
+
+
+# ─── Обработка сообщений ──────────────────────────────────────────────────
+
+def handle_message(chat_id: int, text: str, user_name: str = ""):
+    global MANAGER_CHAT_ID, OWNER_CHAT_ID
+
+    # Ответ менеджера клиенту (приоритет над всем)
+    if chat_id in pending_replies:
+        client_id = pending_replies.pop(chat_id)
+        try:
+            send_msg(client_id, f"Ответ менеджера:\n\n{text}")
+            send_msg(chat_id, "Ответ отправлен клиенту.")
+        except Exception as e:
+            send_msg(chat_id, f"Не удалось отправить: {e}")
+        return
+
+    # Команды
+    if text.strip() == "/myid":
+        global MANAGER_CHAT_ID
+        with open(MANAGER_ID_FILE, "w") as f:
+            f.write(str(chat_id))
+        MANAGER_CHAT_ID = chat_id
+        send_msg(chat_id, f"Ваш Max ID: {chat_id}\nВы сохранены как менеджер — заявки будут приходить вам.")
+        print(f"[MYID] Менеджер сохранён: {user_name} -> {chat_id}")
+        return
+
+    if text.strip() == "/ownerid":
+        global OWNER_CHAT_ID
+        with open(OWNER_ID_FILE, "w") as f:
+            f.write(str(chat_id))
+        OWNER_CHAT_ID = chat_id
+        send_msg(chat_id, f"Ваш Max ID: {chat_id}\nВы сохранены как владелец — будете получать копии всех заявок.")
+        print(f"[OWNERID] Владелец сохранён: {user_name} -> {chat_id}")
+        return
+
+    if text.strip() in ("/cancel", "/отмена"):
+        user_state.pop(chat_id, None)
+        user_data.pop(chat_id, None)
+        send_msg(chat_id, "Хорошо, отменили. Если надумаете — пишите /start")
+        return
+
+    # Начало / рестарт диалога
+    if text.strip() in ("/start", "начать", "start") or chat_id not in user_state:
+        user_data[chat_id] = {}
+        skip = text.strip() in ("/start", "начать", "start", "")
+        greeting_words = ["привет", "здравствуй", "добрый", "хай", "hello", "hi"]
+        if not skip and len(text.split()) <= 2 and any(w in text.lower() for w in greeting_words):
+            skip = True
+
+        if not skip:
+            parsed = parse_order(text)
+            found = []
+            d = user_data[chat_id]
+            if parsed.items and len(parsed.items) > 1:
+                valid_items = [
+                    {"product": it.product, "tons": it.tons, "price_per_ton": PRODUCTS.get(it.product)}
+                    for it in parsed.items if it.product and it.tons and it.tons > 0
+                ]
+                if len(valid_items) > 1:
+                    d["items"] = valid_items
+                    d["product"] = ", ".join(i["product"] for i in valid_items)
+                    d["tons"] = sum(i["tons"] for i in valid_items)
+                    d["volume_text"] = " + ".join(f"{i['tons']}т {i['product']}" for i in valid_items)
+                    for i in valid_items:
+                        found.append(f"{i['product']}: {i['tons']} т")
+            if not d.get("product") and parsed.product and parsed.product in PRODUCTS:
+                d["product"] = parsed.product
+                d["price_per_ton"] = PRODUCTS[parsed.product]
+                found.append(f"Товар: {parsed.product}")
+            if not d.get("tons") and parsed.tons and parsed.tons > 0:
+                d["tons"] = parsed.tons
+                d["volume_text"] = f"{parsed.tons} т"
+                found.append(f"Объём: {parsed.tons} т")
+            if parsed.delivery:
+                d["delivery"] = parsed.delivery
+                found.append(f"Получение: {parsed.delivery}")
+            if parsed.address:
+                d["address"] = parsed.address
+                found.append(f"Адрес: {parsed.address}")
+            if GROQ_API_KEY:
+                try:
+                    contacts = parse_contacts_groq(text)
+                    if contacts.name:
+                        d["contact_name"] = contacts.name
+                        found.append(f"Имя: {contacts.name}")
+                    if contacts.company:
+                        d["company"] = contacts.company
+                        found.append(f"Компания: {contacts.company}")
+                    if contacts.phone:
+                        d["phone"] = contacts.phone
+                        found.append(f"Телефон: {contacts.phone}")
+                except Exception as e:
+                    print(f"[START] contacts error: {e}")
+            if not d.get("phone"):
+                m = re.search(r"[\+\d][\d\s\-\(\)]{6,}", text)
+                if m:
+                    d["phone"] = m.group(0).strip()
+                    found.append(f"Телефон: {d['phone']}")
+            if found:
+                send_msg(chat_id, "Вот что нашёл в вашем сообщении:\n" + "\n".join(found))
+        else:
+            send_msg(chat_id,
+                "Здравствуйте! Рады вас видеть!\n\n"
+                "Вы обратились в Архиповский карьер — поставляем щебень, отсев, гравий, песок и ГПС "
+                "по Краснодарскому краю.\n\n"
+                "Помогу оформить заявку прямо сейчас.\n\n"
+                "Напишите что вам нужно или выберите из меню. Для отмены — /cancel"
+            )
+        new_state = advance(chat_id)
+        if new_state >= 0:
+            user_state[chat_id] = new_state
+        return
+
+    # Обработка текущего состояния
+    state = user_state.get(chat_id, PRODUCT)
+    d = user_data.setdefault(chat_id, {})
+
+    if state == PRODUCT:
+        if text in PRODUCTS:
+            d["product"] = text
+            d["price_per_ton"] = PRODUCTS[text]
+        else:
+            try_parse_freeform(text, chat_id)
+            if not d.get("product"):
+                d["product"] = text[:60]
+                d["price_per_ton"] = None
+                d["tons"] = d.get("tons") or 1
+                d["volume_text"] = "уточнить"
+                send_msg(chat_id, f"По продукции «{text[:60]}» менеджер подберёт условия и свяжется с вами.")
+
+    elif state == VOLUME:
+        tons = parse_tons(text)
+        if tons and tons > 0:
+            d["tons"] = tons
+            d["volume_text"] = text
+        else:
+            try_parse_freeform(text, chat_id)
+            if not d.get("tons"):
+                send_msg(chat_id, "Пожалуйста, укажите объём числом, например: 30 или 15.5")
+                return
+
+    elif state == DELIVERY:
+        t = text.lower()
+        if any(w in t for w in ["самовывоз", "сам заберу", "заберу сам", "заберем", "заберём"]):
+            d["delivery"] = "Самовывоз"
+        elif any(w in t for w in ["доставк", "привезите", "привезти", "доставьте"]):
+            d["delivery"] = "Доставка"
+        elif text in ("Самовывоз", "Доставка"):
+            d["delivery"] = text
+        else:
+            try_parse_freeform(text, chat_id)
+            if not d.get("delivery"):
+                send_msg(chat_id, "Уточните: самовывоз или доставка?")
+                return
+
+    elif state == ADDRESS:
+        d["address"] = text.strip()
+        if GROQ_API_KEY and not d.get("phone"):
+            try:
+                contacts = parse_contacts_groq(text)
+                if contacts.name and not d.get("contact_name"):
+                    d["contact_name"] = contacts.name
+                if contacts.company and not d.get("company"):
+                    d["company"] = contacts.company
+                if contacts.phone:
+                    d["phone"] = contacts.phone
+            except Exception:
+                pass
+
+    elif state == CONTACTS:
+        try:
+            parsed = parse_contacts_groq(text)
+            if parsed.name:
+                d["contact_name"] = parsed.name
+            if parsed.company:
+                d["company"] = parsed.company
+            if parsed.phone:
+                d["phone"] = parsed.phone
+        except Exception as e:
+            print(f"[CONTACTS] parse failed: {e}")
+            d["contact_name"] = text
+        if not d.get("phone"):
+            m = re.search(r"[\+\d][\d\s\-\(\)]{6,}", text)
+            if m:
+                d["phone"] = m.group(0).strip()
+        if not d.get("contact_name"):
+            d["contact_name"] = text
+
+    elif state == PHONE_ONLY:
+        d["phone"] = text.strip()
+
+    new_state = advance(chat_id)
+    if new_state >= 0:
+        user_state[chat_id] = new_state
+
+
+def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
+    answer_cb(callback_id)
+
+    if payload.startswith("reply_"):
+        try:
+            client_id = int(payload.split("_")[1])
+            pending_replies[user_id] = client_id
+            print(f"[REPLY] Менеджер {user_id} нажал ответить клиенту {client_id}")
+            send_msg(user_id, "Напишите ответ — я перешлю клиенту:")
+        except Exception as e:
+            print(f"[REPLY] Ошибка: {e}")
+        return
+
+    # Кнопки-варианты (продукт, доставка) — обрабатываем как текст
+    handle_message(chat_id, payload)
+
+
+def process_update(update: dict):
+    utype = update.get("update_type")
+
+    if utype == "message_created":
+        msg = update.get("message", {})
+        sender = msg.get("sender", {})
+        if sender.get("is_bot"):
+            return
+        user_id = sender.get("user_id")
+        if not user_id:
+            return
+        chat_id = msg.get("recipient", {}).get("chat_id") or user_id
+        user_name = sender.get("name", "")
+        body = msg.get("body", {})
+        text = (body.get("text") or "").strip()
+
+        # Голосовое / аудио
+        attachments = body.get("attachments") or []
+        for att in attachments:
+            if att.get("type") in ("audio", "voice"):
+                audio_url = att.get("payload", {}).get("url", "")
+                if audio_url and GROQ_API_KEY:
+                    transcribed = transcribe_voice_url(audio_url)
+                    if transcribed:
+                        send_msg(chat_id, f"Распознал: «{transcribed}»")
+                        handle_message(chat_id, transcribed, user_name)
+                    else:
+                        send_msg(chat_id, "Не смог распознать голосовое. Пожалуйста, напишите текстом.")
+                else:
+                    send_msg(chat_id, "Голосовые сообщения пока не поддерживаются. Напишите текстом.")
+                return
+
+        if text:
+            handle_message(chat_id, text, user_name)
+
+    elif utype == "message_callback":
+        cb = update.get("callback", {})
+        callback_id = cb.get("callback_id", "")
+        payload = cb.get("payload", "")
+        user = cb.get("user", {})
+        user_id = user.get("user_id")
+        if not user_id:
+            return
+        handle_callback(user_id, user_id, callback_id, payload)
+
+
+# ─── Главный цикл ─────────────────────────────────────────────────────────
+
+def main():
+    print("[STARTUP] Жду 45 сек перед запуском...", flush=True)
+    time.sleep(45)
+    if not TOKEN:
+        print("[STARTUP] ОШИБКА: MAX_BOT_TOKEN не задан!", flush=True)
+        return
+    print(f"[STARTUP] Бот запущен! Manager: {MANAGER_CHAT_ID}", flush=True)
+
+    marker = None
+    while True:
+        try:
+            resp = get_updates(marker=marker, timeout=30)
+            updates = resp.get("updates", [])
+            if "marker" in resp:
+                marker = resp["marker"]
+
+            for upd in updates:
+                try:
+                    process_update(upd)
+                except Exception as e:
+                    import traceback
+                    print(f"[ERROR] process_update: {e}\n{traceback.format_exc()[:400]}", flush=True)
+
+        except KeyboardInterrupt:
+            print("[SHUTDOWN] Остановлен.", flush=True)
+            break
+        except Exception as e:
+            print(f"[ERROR] polling: {e}", flush=True)
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()

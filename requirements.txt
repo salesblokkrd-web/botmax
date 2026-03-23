@@ -1,0 +1,5 @@
+max-botapi-python
+groq
+geopy
+pydantic
+requests
