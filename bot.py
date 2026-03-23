@@ -107,6 +107,8 @@ def send_photo_msg(chat_id: int, photo_url: str, caption: str = "") -> dict:
 
 
 def answer_cb(callback_id: str, notification: str = "") -> dict:
+    if not callback_id:
+        return {}
     return _api("POST", "answers", body={"callback_id": callback_id, "notification": notification})
 
 
@@ -868,13 +870,17 @@ def process_update(update: dict):
 
     elif utype == "message_callback":
         cb = update.get("callback", {})
+        print(f"[CB_RAW] {json.dumps(cb, ensure_ascii=False)[:400]}", flush=True)
         callback_id = cb.get("callback_id", "")
         payload = cb.get("payload", "")
         user = cb.get("user", {})
         user_id = user.get("user_id")
         if not user_id:
             return
-        handle_callback(user_id, user_id, callback_id, payload)
+        # chat_id берём из оригинального сообщения с кнопкой
+        orig_msg = cb.get("message", {})
+        chat_id = orig_msg.get("recipient", {}).get("chat_id") or user_id
+        handle_callback(user_id, chat_id, callback_id, payload)
 
 
 # ─── Главный цикл ─────────────────────────────────────────────────────────
