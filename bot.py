@@ -59,6 +59,7 @@ PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY = range(6)
 user_state: dict = {}   # chat_id -> int (состояние)
 user_data: dict = {}    # chat_id -> dict (данные заявки)
 pending_replies: dict = {}  # manager_id -> client_id
+processed_callbacks: set = set()  # дедупликация нажатий кнопок
 
 # ─── Max Bot API ───────────────────────────────────────────────────────────
 
@@ -700,8 +701,8 @@ def handle_message(chat_id: int, text: str, user_name: str = ""):
                 except Exception as e:
                     print(f"[START] contacts error: {e}")
             if not d.get("phone"):
-                m = re.search(r"[\+\d][\d\s\-\(\)]{6,}", text)
-                if m:
+                m = re.search(r"[\+\d][\d\s\-\(\)]{9,}", text)
+                if m and len(re.sub(r'\D', '', m.group(0))) >= 10:
                     d["phone"] = m.group(0).strip()
                     found.append(f"Телефон: {d['phone']}")
             if found:
@@ -788,8 +789,8 @@ def handle_message(chat_id: int, text: str, user_name: str = ""):
             print(f"[CONTACTS] parse failed: {e}")
             d["contact_name"] = text
         if not d.get("phone"):
-            m = re.search(r"[\+\d][\d\s\-\(\)]{6,}", text)
-            if m:
+            m = re.search(r"[\+\d][\d\s\-\(\)]{9,}", text)
+            if m and len(re.sub(r'\D', '', m.group(0))) >= 10:
                 d["phone"] = m.group(0).strip()
         if not d.get("contact_name"):
             d["contact_name"] = text
@@ -803,7 +804,15 @@ def handle_message(chat_id: int, text: str, user_name: str = ""):
 
 
 def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
+    global processed_callbacks
     answer_cb(callback_id)
+    # Игнорируем повторные нажатия одной и той же кнопки
+    if callback_id in processed_callbacks:
+        print(f"[CB] Дубль проигнорирован: {callback_id}", flush=True)
+        return
+    processed_callbacks.add(callback_id)
+    if len(processed_callbacks) > 2000:
+        processed_callbacks = set(list(processed_callbacks)[-1000:])
 
     if payload.startswith("reply_"):
         try:
@@ -836,9 +845,12 @@ def process_update(update: dict):
         text = (body.get("text") or "").strip()
 
         # Голосовое / аудио
+        VOICE_TYPES = ("audio", "voice", "audio_msg", "audio_message", "voice_message")
         attachments = body.get("attachments") or []
         for att in attachments:
-            if att.get("type") in ("audio", "voice"):
+            att_type = att.get("type", "")
+            print(f"[ATT] Тип вложения: {att_type}", flush=True)
+            if att_type in VOICE_TYPES:
                 audio_url = att.get("payload", {}).get("url", "")
                 if audio_url and GROQ_API_KEY:
                     transcribed = transcribe_voice_url(audio_url)
