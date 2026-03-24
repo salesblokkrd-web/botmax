@@ -4,8 +4,10 @@ import os
 import json
 import time
 import math
+import threading
 import urllib.request
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -78,6 +80,19 @@ processed_callbacks: set = set()  # дедупликация нажатий кн
 
 REPLY_TIMEOUT = 30 * 60  # 30 минут
 
+# ─── Блокировки для многопоточности ────────────────────────────────────────
+_save_lock = threading.Lock()          # защита записи bot_state.json
+_user_locks: dict = {}                 # chat_id -> Lock (один поток на пользователя)
+_user_locks_guard = threading.Lock()   # защита самого словаря _user_locks
+
+
+def get_user_lock(chat_id: int) -> threading.Lock:
+    with _user_locks_guard:
+        if chat_id not in _user_locks:
+            _user_locks[chat_id] = threading.Lock()
+        return _user_locks[chat_id]
+
+
 STATE_FILE = "bot_state.json"
 ANALYTICS_FILE = "analytics.json"
 ORDERS_FILE = "orders.json"
@@ -142,20 +157,21 @@ def load_analytics(days: int = 7) -> list:
 
 
 def save_state():
-    """Атомарно сохраняет состояние диалогов на диск."""
-    data = {
-        "user_state": {str(k): v for k, v in user_state.items()},
-        "user_data": {str(k): v for k, v in user_data.items()},
-        "pending_replies": {str(k): v for k, v in pending_replies.items()},
-        "order_summaries": {str(k): v for k, v in order_summaries.items()},
-    }
-    tmp = STATE_FILE + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, STATE_FILE)
-    except Exception as e:
-        print(f"[STATE] Ошибка сохранения: {e}", flush=True)
+    """Атомарно сохраняет состояние диалогов на диск (потокобезопасно)."""
+    with _save_lock:
+        data = {
+            "user_state": {str(k): v for k, v in user_state.items()},
+            "user_data": {str(k): v for k, v in user_data.items()},
+            "pending_replies": {str(k): v for k, v in pending_replies.items()},
+            "order_summaries": {str(k): v for k, v in order_summaries.items()},
+        }
+        tmp = STATE_FILE + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, STATE_FILE)
+        except Exception as e:
+            print(f"[STATE] Ошибка сохранения: {e}", flush=True)
 
 
 def load_state():
@@ -1206,6 +1222,34 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
     handle_message(chat_id, payload, user_id=user_id)
 
 
+def process_update_safe(update: dict):
+    """Обёртка: определяет chat_id и выполняет update под per-user lock."""
+    utype = update.get("update_type")
+    # Определяем chat_id для блокировки
+    if utype == "message_created":
+        msg = update.get("message", {})
+        chat_id = msg.get("recipient", {}).get("chat_id") or msg.get("sender", {}).get("user_id") or 0
+    elif utype == "message_callback":
+        cb = update.get("callback", {})
+        orig_msg = cb.get("message", {})
+        chat_id = orig_msg.get("recipient", {}).get("chat_id") or cb.get("user", {}).get("user_id") or 0
+    else:
+        chat_id = 0
+
+    lock = get_user_lock(chat_id) if chat_id else None
+    try:
+        if lock:
+            lock.acquire()
+        process_update(update)
+        save_state()
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] process_update: {e}\n{traceback.format_exc()[:400]}", flush=True)
+    finally:
+        if lock:
+            lock.release()
+
+
 def process_update(update: dict):
     utype = update.get("update_type")
 
@@ -1277,27 +1321,23 @@ def main():
     load_state()
 
     marker = None
-    while True:
-        try:
-            resp = get_updates(marker=marker, timeout=30)
-            updates = resp.get("updates", [])
-            if "marker" in resp:
-                marker = resp["marker"]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        while True:
+            try:
+                resp = get_updates(marker=marker, timeout=30)
+                updates = resp.get("updates", [])
+                if "marker" in resp:
+                    marker = resp["marker"]
 
-            for upd in updates:
-                try:
-                    process_update(upd)
-                    save_state()
-                except Exception as e:
-                    import traceback
-                    print(f"[ERROR] process_update: {e}\n{traceback.format_exc()[:400]}", flush=True)
+                for upd in updates:
+                    pool.submit(process_update_safe, upd)
 
-        except KeyboardInterrupt:
-            print("[SHUTDOWN] Остановлен.", flush=True)
-            break
-        except Exception as e:
-            print(f"[ERROR] polling: {e}", flush=True)
-            time.sleep(5)
+            except KeyboardInterrupt:
+                print("[SHUTDOWN] Остановлен.", flush=True)
+                break
+            except Exception as e:
+                print(f"[ERROR] polling: {e}", flush=True)
+                time.sleep(5)
 
 
 if __name__ == "__main__":
