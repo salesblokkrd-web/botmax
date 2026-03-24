@@ -71,9 +71,12 @@ PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY, CONFIRM = range(7)
 # State machine (вместо ConversationHandler из PTB)
 user_state: dict = {}   # chat_id -> int (состояние)
 user_data: dict = {}    # chat_id -> dict (данные заявки)
-pending_replies: dict = {}  # manager_id -> client_id
+pending_replies: dict = {}  # manager_id -> {"client_id": int, "expires": float, "summary": str}
+order_summaries: dict = {}  # client_id -> краткий саммари заявки для менеджера
 pending_voice: dict = {}    # chat_id -> (text, user_name, user_id)
 processed_callbacks: set = set()  # дедупликация нажатий кнопок
+
+REPLY_TIMEOUT = 30 * 60  # 30 минут
 
 STATE_FILE = "bot_state.json"
 
@@ -84,6 +87,7 @@ def save_state():
         "user_state": {str(k): v for k, v in user_state.items()},
         "user_data": {str(k): v for k, v in user_data.items()},
         "pending_replies": {str(k): v for k, v in pending_replies.items()},
+        "order_summaries": {str(k): v for k, v in order_summaries.items()},
     }
     tmp = STATE_FILE + ".tmp"
     try:
@@ -101,7 +105,10 @@ def load_state():
             data = json.load(f)
         user_state.update({int(k): v for k, v in data.get("user_state", {}).items()})
         user_data.update({int(k): v for k, v in data.get("user_data", {}).items()})
-        pending_replies.update({int(k): int(v) for k, v in data.get("pending_replies", {}).items()})
+        # pending_replies: поддержка старого формата (int) и нового (dict)
+        for k, v in data.get("pending_replies", {}).items():
+            pending_replies[int(k)] = v if isinstance(v, dict) else {"client_id": int(v), "expires": 0, "summary": ""}
+        order_summaries.update({int(k): v for k, v in data.get("order_summaries", {}).items()})
         print(f"[STATE] Загружено: {len(user_state)} диалогов, {len(pending_replies)} ожидающих ответов", flush=True)
     except FileNotFoundError:
         pass
@@ -705,6 +712,12 @@ def finalize(chat_id: int):
         mgr.append(f"Материал (предв.): ~{material_cost:,} руб. ({price_per_ton} руб/т)".replace(",", " "))
     mgr.append(f"\nMax ID клиента: {chat_id}")
 
+    # Сохраняем краткий саммари для контекста при ответе менеджера
+    product_str = d.get("volume_text") or f"{tons} т"
+    if items:
+        product_str = " + ".join(f"{i['product']} {i['tons']}т" for i in items)
+    order_summaries[chat_id] = f"{contact_name} | {product_str} | тел: {phone}"
+
     reply_btn = [[{"type": "callback", "text": "Ответить клиенту", "payload": f"reply_{chat_id}"}]]
     send_msg(MANAGER_CHAT_ID, "\n".join(mgr), reply_btn)
     if map_url:
@@ -731,14 +744,32 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
     if user_id is None:
         user_id = chat_id
 
+    # Отмена режима ответа
+    if text.strip() == "/cancel_reply":
+        if user_id in pending_replies:
+            pending_replies.pop(user_id)
+            save_state()
+            send_msg(chat_id, "Режим ответа отменён.")
+        else:
+            send_msg(chat_id, "Нет активного режима ответа.")
+        return
+
     # Ответ менеджера клиенту (приоритет над всем) — проверяем по user_id
     if user_id in pending_replies:
-        client_id = pending_replies.pop(user_id)
+        entry = pending_replies.pop(user_id)
+        client_id = entry["client_id"] if isinstance(entry, dict) else entry
+        expires = entry.get("expires", 0) if isinstance(entry, dict) else 0
+        summary = entry.get("summary", "") if isinstance(entry, dict) else ""
+        if expires and time.time() > expires:
+            save_state()
+            send_msg(chat_id, f"⏱ Время ожидания истекло (30 мин). Нажмите кнопку «Ответить клиенту» снова.")
+            return
         try:
             send_msg(client_id, f"Ответ менеджера:\n\n{text}")
-            send_msg(chat_id, "Ответ отправлен клиенту.")
+            send_msg(chat_id, f"✅ Ответ отправлен клиенту.")
         except Exception as e:
             send_msg(chat_id, f"Не удалось отправить: {e}")
+        save_state()
         return
 
     # Команды
@@ -975,17 +1006,23 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
     if payload.startswith("reply_"):
         try:
             client_id = int(payload.split("_")[1])
-            pending_replies[user_id] = client_id  # ключ — user_id менеджера
-            print(f"[REPLY] Менеджер {user_id} нажал ответить клиенту {client_id}")
-            # Пробуем отправить сообщение; если нет диалога — показываем уведомление
-            result = send_msg(chat_id, "Напишите ответ — я перешлю клиенту:")
+            summary = order_summaries.get(client_id, "")
+            pending_replies[user_id] = {
+                "client_id": client_id,
+                "expires": time.time() + REPLY_TIMEOUT,
+                "summary": summary,
+            }
+            print(f"[REPLY] Менеджер {user_id} → клиент {client_id}: {summary}")
+            context_line = f"\nЗаявка: {summary}" if summary else ""
+            prompt = f"Напишите ответ — я перешлю клиенту:{context_line}\n\n/cancel_reply — отменить"
+            result = send_msg(chat_id, prompt)
             if not result.get("message"):
-                answer_cb(callback_id, "Напишите следующий ответ — он будет переслан клиенту")
+                answer_cb(callback_id, "Напишите ответ — он будет переслан клиенту")
             else:
                 answer_cb(callback_id)
         except Exception as e:
             print(f"[REPLY] Ошибка: {e}")
-            answer_cb(callback_id, "Напишите следующий ответ — он будет переслан клиенту")
+            answer_cb(callback_id, "Напишите ответ — он будет переслан клиенту")
         return
 
     if payload == "confirm_yes":
