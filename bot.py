@@ -53,12 +53,26 @@ PRODUCTS = {
     "ГПС хороший":           160,
 }
 
+DENSITY = {
+    "Отсев 0-5":             1.27,
+    "Щебень 5-20":           1.45,
+    "Щебень 20-40":          1.42,
+    "Щебень 40-70":          1.44,
+    "Песок мелкозернистый":  1.50,
+    "Песок крупнозернистый": 1.50,
+    "Гравий":                1.45,
+    "ГПС плохой":            1.77,
+    "ГПС хороший":           1.77,
+}
+DEFAULT_DENSITY = 1.5
+
 PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY = range(6)
 
 # State machine (вместо ConversationHandler из PTB)
 user_state: dict = {}   # chat_id -> int (состояние)
 user_data: dict = {}    # chat_id -> dict (данные заявки)
 pending_replies: dict = {}  # manager_id -> client_id
+pending_voice: dict = {}    # chat_id -> (text, user_name, user_id)
 processed_callbacks: set = set()  # дедупликация нажатий кнопок
 
 # ─── Max Bot API ───────────────────────────────────────────────────────────
@@ -137,6 +151,7 @@ class OrderParsed(BaseModel):
     items: Optional[List[OrderItem]] = None
     product: Optional[str] = None
     tons: Optional[float] = None
+    unit: Optional[str] = None  # 'тонн' или 'куб'
     delivery: Optional[str] = None
     address: Optional[str] = None
 
@@ -184,9 +199,17 @@ def parse_order_regex(text: str) -> OrderParsed:
                 if not result.tons:
                     result.tons = float(m_frac.group(1))
                 break
-    m = re.search(r'(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|кубо\w*|м[³3])', t)
+    m = re.search(r'(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|куб\w*|м[³3])', t)
     if m:
-        result.tons = float(m.group(1).replace(",", "."))
+        val = float(m.group(1).replace(",", "."))
+        unit_str = m.group(2)
+        if re.match(r'куб|м[³3]', unit_str):
+            result.unit = 'куб'
+            density = DENSITY.get(result.product, DEFAULT_DENSITY)
+            result.tons = round(val * density, 1)
+        else:
+            result.unit = 'тонн'
+            result.tons = val
     if any(w in t for w in ["доставк", "привез", "привоз", "доставьте", "привезти", "доставить"]):
         result.delivery = "Доставка"
     elif any(w in t for w in ["самовывоз", "заберу", "сам заберу"]):
@@ -210,7 +233,11 @@ def parse_order_groq(text: str) -> OrderParsed:
                 f"Сообщение клиента: «{text}»\n\n"
                 "ВАЖНО: фракция щебня — два числа через дефис (5-20, 20-40, 40-70). "
                 "Если клиент пишет '7 5-20' — это 7 тонн щебня 5-20. "
-                "КРИТИЧНО: 520, 2040, 4070 — это НЕ тоннаж, это фракции слитно.\n\n"
+                "КРИТИЧНО: 520, 2040, 4070 — это НЕ тоннаж, это фракции слитно.\n"
+                "КУБЫ → ТОННЫ: если клиент указал кубометры/кубов/куб/м³ — переведи в тонны по насыпной плотности: "
+                "Отсев 0-5=1.27, Щебень 5-20=1.45, Щебень 20-40=1.42, Щебень 40-70=1.44, "
+                "Песок мелкозернистый=1.50, Песок крупнозернистый=1.50, Гравий=1.45, ГПС=1.77. "
+                "Если продукт неизвестен — умножай на 1.5. В tons всегда возвращай тонны.\n\n"
                 "Верни JSON:\n"
                 "- items: [{\"product\": точное название или null, \"tons\": число или null}]\n"
                 "- delivery: «Доставка» или «Самовывоз» или null\n"
@@ -339,7 +366,15 @@ def get_road_distance(origin, destination):
     return None
 
 
-def parse_tons(text: str):
+def parse_tons(text: str, product: str = None):
+    m = re.search(r"(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|куб\w*|м[³3])", text)
+    if m:
+        val = float(m.group(1).replace(",", "."))
+        unit_str = m.group(2)
+        if re.match(r'куб|м[³3]', unit_str):
+            density = DENSITY.get(product, DEFAULT_DENSITY)
+            return round(val * density, 1)
+        return val
     m = re.search(r"(\d+[.,]?\d*)", text)
     return float(m.group(1).replace(",", ".")) if m else None
 
@@ -765,7 +800,7 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
                 send_msg(chat_id, f"По продукции «{text[:60]}» менеджер подберёт условия и свяжется с вами.")
 
     elif state == VOLUME:
-        tons = parse_tons(text)
+        tons = parse_tons(text, d.get("product"))
         if tons and tons > 0:
             d["tons"] = tons
             d["volume_text"] = text
@@ -841,6 +876,22 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
     if len(processed_callbacks) > 2000:
         processed_callbacks = set(list(processed_callbacks)[-1000:])
 
+    if payload == "voice_ok":
+        entry = pending_voice.pop(chat_id, None)
+        if entry:
+            transcribed, user_name, uid = entry
+            answer_cb(callback_id)
+            handle_message(chat_id, transcribed, user_name, user_id=uid)
+        else:
+            answer_cb(callback_id)
+        return
+
+    if payload == "voice_retry":
+        pending_voice.pop(chat_id, None)
+        answer_cb(callback_id)
+        send_msg(chat_id, "Хорошо, отправьте голосовое ещё раз.")
+        return
+
     if payload.startswith("reply_"):
         try:
             client_id = int(payload.split("_")[1])
@@ -889,8 +940,12 @@ def process_update(update: dict):
                 if audio_url and GROQ_API_KEY:
                     transcribed = transcribe_voice_url(audio_url)
                     if transcribed:
-                        send_msg(chat_id, f"Распознал: «{transcribed}»")
-                        handle_message(chat_id, transcribed, user_name)
+                        pending_voice[chat_id] = (transcribed, user_name, user_id)
+                        btns = [[
+                            {"type": "callback", "text": "✅ Всё правильно", "payload": "voice_ok"},
+                            {"type": "callback", "text": "🔄 Повторить", "payload": "voice_retry"},
+                        ]]
+                        send_msg(chat_id, f"Распознал: «{transcribed}»\n\nВсё верно?", btns)
                     else:
                         send_msg(chat_id, "Не смог распознать голосовое. Пожалуйста, напишите текстом.")
                 else:
