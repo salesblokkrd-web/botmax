@@ -79,6 +79,38 @@ processed_callbacks: set = set()  # дедупликация нажатий кн
 REPLY_TIMEOUT = 30 * 60  # 30 минут
 
 STATE_FILE = "bot_state.json"
+ANALYTICS_FILE = "analytics.json"
+
+
+def track_event(event: str, **kwargs):
+    """Дописывает событие в analytics.json (append-only)."""
+    record = {"ts": time.time(), "event": event, **kwargs}
+    try:
+        with open(ANALYTICS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[ANALYTICS] Ошибка записи: {e}", flush=True)
+
+
+def load_analytics(days: int = 7) -> list:
+    """Загружает события за последние N дней."""
+    since = time.time() - days * 86400
+    events = []
+    try:
+        with open(ANALYTICS_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    if rec.get("ts", 0) >= since:
+                        events.append(rec)
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    return events
 
 
 def save_state():
@@ -640,6 +672,14 @@ def finalize(chat_id: int):
             geocode_failed = True
 
     # ── Клиенту ────────────────────────────────────────────────────────────
+    track_event("order_completed",
+        chat_id=chat_id,
+        product=product,
+        tons=tons,
+        delivery=delivery,
+        material_cost=material_cost,
+    )
+
     lines = ["Заявка принята! Передаём менеджеру.\n"]
     if items:
         for i in items:
@@ -767,12 +807,63 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         try:
             send_msg(client_id, f"Ответ менеджера:\n\n{text}")
             send_msg(chat_id, f"✅ Ответ отправлен клиенту.")
+            track_event("manager_replied", manager_id=user_id, client_id=client_id)
         except Exception as e:
             send_msg(chat_id, f"Не удалось отправить: {e}")
         save_state()
         return
 
     # Команды
+    if text.strip() == "/stats":
+        if OWNER_CHAT_ID and chat_id != OWNER_CHAT_ID and user_id != OWNER_CHAT_ID:
+            send_msg(chat_id, "Команда доступна только владельцу.")
+            return
+        now = time.time()
+        today_start = now - (now % 86400)  # начало суток UTC
+        events_7d = load_analytics(days=7)
+        events_today = [e for e in events_7d if e.get("ts", 0) >= today_start]
+
+        def count(evs, etype): return sum(1 for e in evs if e.get("event") == etype)
+
+        started_today = count(events_today, "conversation_started")
+        started_7d    = count(events_7d,    "conversation_started")
+        completed_today = count(events_today, "order_completed")
+        completed_7d    = count(events_7d,    "order_completed")
+        replied_today = count(events_today, "manager_replied")
+        replied_7d    = count(events_7d,    "manager_replied")
+
+        conv_today = f"{round(completed_today/started_today*100)}%" if started_today else "—"
+        conv_7d    = f"{round(completed_7d/started_7d*100)}%" if started_7d else "—"
+
+        # Топ товаров за 7 дней
+        from collections import Counter
+        products_7d = [e.get("product") for e in events_7d if e.get("event") == "order_completed" and e.get("product")]
+        top_products = Counter(products_7d).most_common(3)
+        top_str = "\n".join(f"  {p}: {n} заявок" for p, n in top_products) or "  нет данных"
+
+        # Доставка vs самовывоз
+        deliveries = [e.get("delivery") for e in events_7d if e.get("event") == "order_completed"]
+        delivery_count  = deliveries.count("Доставка")
+        pickup_count    = deliveries.count("Самовывоз")
+
+        msg = (
+            f"Статистика бота (Max)\n\n"
+            f"Сегодня:\n"
+            f"  Начали диалог: {started_today}\n"
+            f"  Оформили заявку: {completed_today}\n"
+            f"  Конверсия: {conv_today}\n"
+            f"  Ответов менеджера: {replied_today}\n\n"
+            f"За 7 дней:\n"
+            f"  Начали диалог: {started_7d}\n"
+            f"  Оформили заявку: {completed_7d}\n"
+            f"  Конверсия: {conv_7d}\n"
+            f"  Ответов менеджера: {replied_7d}\n"
+            f"  Доставка: {delivery_count} | Самовывоз: {pickup_count}\n\n"
+            f"Топ товаров (7 дней):\n{top_str}"
+        )
+        send_msg(chat_id, msg)
+        return
+
     if text.strip() == "/myid":
         global MANAGER_CHAT_ID
         with open(MANAGER_ID_FILE, "w") as f:
@@ -799,6 +890,8 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
 
     # Начало / рестарт диалога
     if text.strip() in ("/start", "начать", "start") or chat_id not in user_state:
+        if chat_id not in user_state:
+            track_event("conversation_started", chat_id=chat_id)
         user_data[chat_id] = {}
         skip = text.strip() in ("/start", "начать", "start", "")
         greeting_words = ["привет", "здравствуй", "добрый", "хай", "hello", "hi"]
