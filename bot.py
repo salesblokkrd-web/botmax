@@ -80,6 +80,34 @@ REPLY_TIMEOUT = 30 * 60  # 30 минут
 
 STATE_FILE = "bot_state.json"
 ANALYTICS_FILE = "analytics.json"
+ORDERS_FILE = "orders.json"
+
+
+def save_order(order: dict):
+    """Дописывает заявку в orders.json (append-only)."""
+    try:
+        with open(ORDERS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(order, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[ORDERS] Ошибка записи: {e}", flush=True)
+
+
+def load_orders(limit: int = 10) -> list:
+    """Загружает последние N заявок."""
+    orders = []
+    try:
+        with open(ORDERS_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    orders.append(json.loads(line))
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    return orders[-limit:]
 
 
 def track_event(event: str, **kwargs):
@@ -679,6 +707,19 @@ def finalize(chat_id: int):
         delivery=delivery,
         material_cost=material_cost,
     )
+    save_order({
+        "ts": time.time(),
+        "client_id": chat_id,
+        "name": contact_name,
+        "company": company,
+        "phone": phone,
+        "product": product,
+        "tons": tons,
+        "delivery": delivery,
+        "address": d.get("address", ""),
+        "material_cost": material_cost,
+        "delivery_cost": delivery_cost,
+    })
 
     lines = ["Заявка принята! Передаём менеджеру.\n"]
     if items:
@@ -862,6 +903,31 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
             f"Топ товаров (7 дней):\n{top_str}"
         )
         send_msg(chat_id, msg)
+        return
+
+    if text.strip() in ("/заявки", "/orders"):
+        is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
+        is_manager = MANAGER_CHAT_ID and (chat_id == MANAGER_CHAT_ID or user_id == MANAGER_CHAT_ID)
+        if not is_owner and not is_manager:
+            send_msg(chat_id, "Команда доступна только менеджеру или владельцу.")
+            return
+        orders = load_orders(limit=10)
+        if not orders:
+            send_msg(chat_id, "Заявок пока нет.")
+            return
+        import datetime
+        for o in reversed(orders):
+            dt = datetime.datetime.fromtimestamp(o["ts"]).strftime("%d.%m %H:%M")
+            lines = [f"{dt} — {o.get('name', '—')}"]
+            lines.append(f"  {o.get('product', '—')}, {o.get('tons', '?')} т, {o.get('delivery', '—')}")
+            if o.get("address"):
+                lines.append(f"  Адрес: {o['address']}")
+            lines.append(f"  Тел: {o.get('phone', '—')}")
+            if o.get("material_cost"):
+                total = o["material_cost"] + (o.get("delivery_cost") or 0)
+                lines.append(f"  ~{total:,} руб.".replace(",", " "))
+            btn = [[{"type": "callback", "text": "Ответить", "payload": f"reply_{o['client_id']}"}]]
+            send_msg(chat_id, "\n".join(lines), btn)
         return
 
     if text.strip() == "/myid":
