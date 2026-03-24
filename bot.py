@@ -880,22 +880,21 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         print(f"[VOICE_CB] voice_ok: user_id={user_id}, chat_id={chat_id}, pending_keys={list(pending_voice.keys())}", flush=True)
         entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
         if entry:
-            transcribed, uname, uid = entry
-            print(f"[VOICE_CB] found entry, transcribed={transcribed!r}", flush=True)
+            transcribed, uname, uid, orig_chat_id = entry
+            print(f"[VOICE_CB] found entry, orig_chat_id={orig_chat_id}, transcribed={transcribed!r}", flush=True)
             answer_cb(callback_id)
-            send_msg(chat_id or user_id, "✅ Принято, обрабатываю...")
-            handle_message(chat_id, transcribed, uname, user_id=uid)
+            send_msg(orig_chat_id, "✅ Принято, обрабатываю...")
+            handle_message(orig_chat_id, transcribed, uname, user_id=uid)
         else:
             print(f"[VOICE_CB] entry not found in pending_voice", flush=True)
             answer_cb(callback_id)
-            send_msg(chat_id or user_id, "Сессия истекла. Отправьте голосовое ещё раз.")
         return
 
     if payload == "voice_retry":
-        pending_voice.pop(chat_id, None)
-        pending_voice.pop(user_id, None)
+        entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
+        orig_chat_id = entry[3] if entry else (chat_id or user_id)
         answer_cb(callback_id)
-        send_msg(chat_id or user_id, "Хорошо, отправьте голосовое ещё раз.")
+        send_msg(orig_chat_id, "Хорошо, отправьте голосовое ещё раз.")
         return
 
     if payload.startswith("reply_"):
@@ -946,9 +945,9 @@ def process_update(update: dict):
                 if audio_url and GROQ_API_KEY:
                     transcribed = transcribe_voice_url(audio_url)
                     if transcribed:
-                        pending_voice[chat_id] = (transcribed, user_name, user_id)
+                        pending_voice[chat_id] = (transcribed, user_name, user_id, chat_id)
                         if user_id and user_id != chat_id:
-                            pending_voice[user_id] = (transcribed, user_name, user_id)
+                            pending_voice[user_id] = (transcribed, user_name, user_id, chat_id)
                         btns = [[
                             {"type": "callback", "text": "✅ Всё правильно", "payload": "voice_ok"},
                             {"type": "callback", "text": "🔄 Повторить", "payload": "voice_retry"},
