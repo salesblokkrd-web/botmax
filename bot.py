@@ -883,6 +883,7 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
             transcribed, uname, uid = entry
             print(f"[VOICE_CB] found entry, transcribed={transcribed!r}", flush=True)
             answer_cb(callback_id)
+            send_msg(chat_id or user_id, "✅ Принято, обрабатываю...")
             handle_message(chat_id, transcribed, uname, user_id=uid)
         else:
             print(f"[VOICE_CB] entry not found in pending_voice", flush=True)
