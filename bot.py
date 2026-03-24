@@ -125,7 +125,7 @@ def answer_cb(callback_id: str, notification: str = "") -> dict:
         return {}
     # Max API требует callback_id как URL-параметр, а не в теле
     params = {"callback_id": callback_id}
-    body = {"notification": notification} if notification else {}
+    body = {"notification": notification}
     return _api("POST", "answers", params=params, body=body)
 
 
