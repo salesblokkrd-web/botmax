@@ -877,19 +877,24 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         processed_callbacks = set(list(processed_callbacks)[-1000:])
 
     if payload == "voice_ok":
-        entry = pending_voice.pop(chat_id, None)
+        print(f"[VOICE_CB] voice_ok: user_id={user_id}, chat_id={chat_id}, pending_keys={list(pending_voice.keys())}", flush=True)
+        entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
         if entry:
-            transcribed, user_name, uid = entry
+            transcribed, uname, uid = entry
+            print(f"[VOICE_CB] found entry, transcribed={transcribed!r}", flush=True)
             answer_cb(callback_id)
-            handle_message(chat_id, transcribed, user_name, user_id=uid)
+            handle_message(chat_id, transcribed, uname, user_id=uid)
         else:
+            print(f"[VOICE_CB] entry not found in pending_voice", flush=True)
             answer_cb(callback_id)
+            send_msg(chat_id or user_id, "Сессия истекла. Отправьте голосовое ещё раз.")
         return
 
     if payload == "voice_retry":
         pending_voice.pop(chat_id, None)
+        pending_voice.pop(user_id, None)
         answer_cb(callback_id)
-        send_msg(chat_id, "Хорошо, отправьте голосовое ещё раз.")
+        send_msg(chat_id or user_id, "Хорошо, отправьте голосовое ещё раз.")
         return
 
     if payload.startswith("reply_"):
@@ -941,6 +946,8 @@ def process_update(update: dict):
                     transcribed = transcribe_voice_url(audio_url)
                     if transcribed:
                         pending_voice[chat_id] = (transcribed, user_name, user_id)
+                        if user_id and user_id != chat_id:
+                            pending_voice[user_id] = (transcribed, user_name, user_id)
                         btns = [[
                             {"type": "callback", "text": "✅ Всё правильно", "payload": "voice_ok"},
                             {"type": "callback", "text": "🔄 Повторить", "payload": "voice_retry"},
