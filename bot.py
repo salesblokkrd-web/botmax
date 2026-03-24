@@ -109,7 +109,10 @@ def send_photo_msg(chat_id: int, photo_url: str, caption: str = "") -> dict:
 def answer_cb(callback_id: str, notification: str = "") -> dict:
     if not callback_id:
         return {}
-    return _api("POST", "answers", body={"callback_id": callback_id, "notification": notification})
+    # Max API требует callback_id как URL-параметр, а не в теле
+    params = {"callback_id": callback_id}
+    body = {"notification": notification} if notification else {}
+    return _api("POST", "answers", params=params, body=body)
 
 
 def get_updates(marker=None, timeout: int = 30) -> dict:
@@ -369,7 +372,9 @@ def transcribe_voice_url(audio_url: str):
             model="whisper-large-v3",
             language="ru",
         )
-        return result.text.strip()
+        text = result.text.strip()
+        print(f"[VOICE] Распознано: «{text}»", flush=True)
+        return text
     except Exception as e:
         print(f"[VOICE] ошибка расшифровки: {e}", flush=True)
         return None
