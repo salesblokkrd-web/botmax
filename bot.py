@@ -75,6 +75,39 @@ pending_replies: dict = {}  # manager_id -> client_id
 pending_voice: dict = {}    # chat_id -> (text, user_name, user_id)
 processed_callbacks: set = set()  # дедупликация нажатий кнопок
 
+STATE_FILE = "bot_state.json"
+
+
+def save_state():
+    """Атомарно сохраняет состояние диалогов на диск."""
+    data = {
+        "user_state": {str(k): v for k, v in user_state.items()},
+        "user_data": {str(k): v for k, v in user_data.items()},
+        "pending_replies": {str(k): v for k, v in pending_replies.items()},
+    }
+    tmp = STATE_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        print(f"[STATE] Ошибка сохранения: {e}", flush=True)
+
+
+def load_state():
+    """Загружает состояние диалогов при старте."""
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        user_state.update({int(k): v for k, v in data.get("user_state", {}).items()})
+        user_data.update({int(k): v for k, v in data.get("user_data", {}).items()})
+        pending_replies.update({int(k): int(v) for k, v in data.get("pending_replies", {}).items()})
+        print(f"[STATE] Загружено: {len(user_state)} диалогов, {len(pending_replies)} ожидающих ответов", flush=True)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[STATE] Ошибка загрузки: {e}", flush=True)
+
 # ─── Max Bot API ───────────────────────────────────────────────────────────
 
 BASE_URL = "https://botapi.max.ru"
@@ -849,13 +882,14 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
                 d["phone"] = parsed.phone
         except Exception as e:
             print(f"[CONTACTS] parse failed: {e}")
-            d["contact_name"] = text
         if not d.get("phone"):
             m = re.search(r"[\+\d][\d\s\-\(\)]{9,}", text)
             if m and len(re.sub(r'\D', '', m.group(0))) >= 10:
                 d["phone"] = m.group(0).strip()
         if not d.get("contact_name"):
-            d["contact_name"] = text
+            # Убираем телефон из текста, чтобы имя не стало "+79991234567"
+            name_candidate = re.sub(r'[\+\d][\d\s\-\(\)]{9,}', '', text).strip(' ,')
+            d["contact_name"] = name_candidate if name_candidate else text
 
     elif state == PHONE_ONLY:
         d["phone"] = text.strip()
@@ -986,6 +1020,7 @@ def main():
         print("[STARTUP] ОШИБКА: MAX_BOT_TOKEN не задан!", flush=True)
         return
     print(f"[STARTUP] Бот запущен! Manager: {MANAGER_CHAT_ID}", flush=True)
+    load_state()
 
     marker = None
     while True:
@@ -998,6 +1033,7 @@ def main():
             for upd in updates:
                 try:
                     process_update(upd)
+                    save_state()
                 except Exception as e:
                     import traceback
                     print(f"[ERROR] process_update: {e}\n{traceback.format_exc()[:400]}", flush=True)
