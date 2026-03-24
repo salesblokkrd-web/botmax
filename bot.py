@@ -66,7 +66,7 @@ DENSITY = {
 }
 DEFAULT_DENSITY = 1.5
 
-PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY = range(6)
+PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY, CONFIRM = range(7)
 
 # State machine (вместо ConversationHandler из PTB)
 user_state: dict = {}   # chat_id -> int (состояние)
@@ -507,6 +507,26 @@ def try_parse_freeform(text: str, chat_id: int) -> bool:
     return found
 
 
+def build_confirm_summary(d: dict) -> str:
+    """Краткое резюме заявки для шага подтверждения."""
+    lines = []
+    items = d.get("items")
+    if items:
+        for i in items:
+            lines.append(f"  {i['product']} — {i['tons']} т")
+    else:
+        lines.append(f"  Товар: {d.get('product', '—')}")
+        lines.append(f"  Объём: {d.get('volume_text', d.get('tons', '—'))}")
+    lines.append(f"  Получение: {d.get('delivery', '—')}")
+    if d.get("delivery") == "Доставка" and d.get("address"):
+        lines.append(f"  Адрес: {d['address']}")
+    lines.append(f"  Имя: {d.get('contact_name', '—')}")
+    if d.get("company"):
+        lines.append(f"  Компания: {d['company']}")
+    lines.append(f"  Телефон: {d.get('phone', '—')}")
+    return "\n".join(lines)
+
+
 def advance(chat_id: int) -> int:
     """Определяет следующий шаг диалога. Возвращает состояние или -1 (конец)."""
     d = user_data.get(chat_id, {})
@@ -560,10 +580,13 @@ def advance(chat_id: int) -> int:
             send_msg(chat_id, "Последний шаг — подскажите номер телефона, и заявка готова.")
             return PHONE_ONLY
 
-    finalize(chat_id)
-    user_state.pop(chat_id, None)
-    user_data.pop(chat_id, None)
-    return -1
+    summary = build_confirm_summary(user_data.get(chat_id, {}))
+    btns = [[
+        {"type": "callback", "text": "✅ Отправить заявку", "payload": "confirm_yes"},
+        {"type": "callback", "text": "❌ Начать заново", "payload": "confirm_no"},
+    ]]
+    send_msg(chat_id, f"Проверьте заявку:\n\n{summary}\n\nВсё верно?", btns)
+    return CONFIRM
 
 
 def finalize(chat_id: int):
@@ -894,6 +917,24 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
     elif state == PHONE_ONLY:
         d["phone"] = text.strip()
 
+    elif state == CONFIRM:
+        t = text.lower().strip()
+        if any(w in t for w in ["да", "верно", "отправить", "подтвержд", "ок", "ok", "yes", "✅"]):
+            finalize(chat_id)
+            user_state.pop(chat_id, None)
+            user_data.pop(chat_id, None)
+            save_state()
+            return
+        elif any(w in t for w in ["нет", "заново", "начать", "отмена", "cancel", "❌"]):
+            user_state.pop(chat_id, None)
+            user_data.pop(chat_id, None)
+            save_state()
+            send_msg(chat_id, "Хорошо, начнём заново. Напишите что вам нужно или /start")
+            return
+        else:
+            send_msg(chat_id, "Нажмите ✅ Отправить заявку или ❌ Начать заново")
+            return
+
     new_state = advance(chat_id)
     if new_state >= 0:
         user_state[chat_id] = new_state
@@ -945,6 +986,23 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         except Exception as e:
             print(f"[REPLY] Ошибка: {e}")
             answer_cb(callback_id, "Напишите следующий ответ — он будет переслан клиенту")
+        return
+
+    if payload == "confirm_yes":
+        answer_cb(callback_id)
+        if chat_id in user_data:
+            finalize(chat_id)
+            user_state.pop(chat_id, None)
+            user_data.pop(chat_id, None)
+            save_state()
+        return
+
+    if payload == "confirm_no":
+        answer_cb(callback_id)
+        user_state.pop(chat_id, None)
+        user_data.pop(chat_id, None)
+        save_state()
+        send_msg(chat_id, "Хорошо, начнём заново. Напишите что вам нужно или /start")
         return
 
     answer_cb(callback_id)
