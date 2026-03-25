@@ -77,6 +77,7 @@ pending_replies: dict = {}  # manager_id -> {"client_id": int, "expires": float,
 order_summaries: dict = {}  # client_id -> краткий саммари заявки для менеджера
 pending_voice: dict = {}    # chat_id -> (text, user_name, user_id)
 processed_callbacks: set = set()  # дедупликация нажатий кнопок
+user_chat_map: dict = {}   # user_id -> chat_id (Max: callback не содержит chat_id)
 
 REPLY_TIMEOUT = 30 * 60  # 30 минут
 
@@ -1234,7 +1235,8 @@ def process_update_safe(update: dict):
     elif utype == "message_callback":
         cb = update.get("callback", {})
         orig_msg = cb.get("message", {})
-        chat_id = orig_msg.get("recipient", {}).get("chat_id") or cb.get("user", {}).get("user_id") or 0
+        uid = cb.get("user", {}).get("user_id") or 0
+        chat_id = orig_msg.get("recipient", {}).get("chat_id") or user_chat_map.get(uid) or uid or 0
     else:
         chat_id = 0
 
@@ -1264,6 +1266,7 @@ def process_update(update: dict):
         if not user_id:
             return
         chat_id = msg.get("recipient", {}).get("chat_id") or user_id
+        user_chat_map[user_id] = chat_id  # запоминаем правильный chat_id для коллбэков
         user_name = sender.get("name", "")
         body = msg.get("body", {})
         text = (body.get("text") or "").strip()
@@ -1305,9 +1308,10 @@ def process_update(update: dict):
         user_id = user.get("user_id")
         if not user_id:
             return
-        # chat_id берём из оригинального сообщения с кнопкой
+        # chat_id берём из маппинга (Max не передаёт chat_id в callback)
         orig_msg = cb.get("message", {})
-        chat_id = orig_msg.get("recipient", {}).get("chat_id") or user_id
+        chat_id = orig_msg.get("recipient", {}).get("chat_id") or user_chat_map.get(user_id) or user_id
+        print(f"[CB] user_id={user_id} chat_id={chat_id} payload={payload!r}", flush=True)
         handle_callback(user_id, chat_id, callback_id, payload)
 
 
