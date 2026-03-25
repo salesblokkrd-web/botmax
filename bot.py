@@ -416,34 +416,32 @@ def parse_contacts_groq(text: str) -> ContactsParsed:
 # ─── Геокодирование и маршрутизация (идентично tg-bot) ───────────────────
 
 def get_coords(address: str):
-    from geopy.geocoders import Nominatim
-    geolocator = Nominatim(user_agent="quarry_delivery_bot_krd", timeout=10)
-    parts = [p.strip() for p in address.split(",") if p.strip()]
-    city_candidate = parts[0] if parts else address
-    city_only = city_candidate.split()[0] if city_candidate.split() else city_candidate
+    try:
+        from geopy.geocoders import Nominatim
+        geolocator = Nominatim(user_agent="quarry_delivery_bot_krd", timeout=5)
+        parts = [p.strip() for p in address.split(",") if p.strip()]
+        city_candidate = parts[0] if parts else address
+        city_only = city_candidate.split()[0] if city_candidate.split() else city_candidate
 
-    def in_russia(loc):
-        return 40.0 <= loc.latitude <= 80.0 and 25.0 <= loc.longitude <= 180.0
+        def in_russia(loc):
+            return 40.0 <= loc.latitude <= 80.0 and 25.0 <= loc.longitude <= 180.0
 
-    # Полный адрес + Краснодарский край — сначала, чтобы не попасть в другой регион
-    queries = [
-        f"{address}, Краснодарский край, Россия",
-        f"{address}, Россия",
-        f"{city_candidate}, Краснодарский край, Россия",
-        f"{city_only}, Краснодарский край, Россия",
-        f"{city_candidate}, Россия",
-        f"{city_only}, Россия",
-        city_candidate,
-    ]
-    for query in queries:
-        try:
-            loc = geolocator.geocode(query)
-            if loc and in_russia(loc):
-                print(f"[GEOCODE] OK: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})")
-                return (loc.latitude, loc.longitude)
-        except Exception as e:
-            print(f"[GEOCODE] ошибка: {e}")
-    print(f"[GEOCODE] ERR не найдено: {address!r}")
+        queries = [
+            f"{address}, Краснодарский край, Россия",
+            f"{city_candidate}, Краснодарский край, Россия",
+            f"{city_only}, Россия",
+        ]
+        for query in queries:
+            try:
+                loc = geolocator.geocode(query)
+                if loc and in_russia(loc):
+                    print(f"[GEOCODE] OK: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})", flush=True)
+                    return (loc.latitude, loc.longitude)
+            except Exception as e:
+                print(f"[GEOCODE] ошибка: {e}", flush=True)
+        print(f"[GEOCODE] не найдено: {address!r}", flush=True)
+    except Exception as e:
+        print(f"[GEOCODE] критическая ошибка: {e}", flush=True)
     return None
 
 
@@ -700,19 +698,24 @@ def finalize(chat_id: int):
     map_url = None
 
     if delivery == "Доставка":
-        coords = get_coords(address)
-        if coords:
-            distance_km = get_road_distance(BASE_COORDS, coords)
-            if distance_km is None:
-                from geopy.distance import geodesic
-                distance_km = round(geodesic(BASE_COORDS, coords).km * 1.3, 1)
-            delivery_cost = round(distance_km * tons * RATE_PER_TON_KM)
-            map_url = (
-                f"https://static-maps.yandex.ru/1.x/?l=map&lang=ru_RU&size=600,400"
-                f"&pt={BASE_COORDS[1]},{BASE_COORDS[0]},pm2rdm"
-                f"~{coords[1]},{coords[0]},pm2blm"
-            )
-        else:
+        try:
+            coords = get_coords(address)
+            if coords:
+                distance_km = get_road_distance(BASE_COORDS, coords)
+                if distance_km is None:
+                    from geopy.distance import geodesic
+                    distance_km = round(geodesic(BASE_COORDS, coords).km * 1.3, 1)
+                if distance_km is not None and tons:
+                    delivery_cost = round(distance_km * tons * RATE_PER_TON_KM)
+                map_url = (
+                    f"https://static-maps.yandex.ru/1.x/?l=map&lang=ru_RU&size=600,400"
+                    f"&pt={BASE_COORDS[1]},{BASE_COORDS[0]},pm2rdm"
+                    f"~{coords[1]},{coords[0]},pm2blm"
+                )
+            else:
+                geocode_failed = True
+        except Exception as e:
+            print(f"[GEOCODE] ошибка в finalize: {e}", flush=True)
             geocode_failed = True
 
     # ── Клиенту ────────────────────────────────────────────────────────────
@@ -1316,7 +1319,9 @@ def main():
     if not TOKEN:
         print("[STARTUP] ОШИБКА: MAX_BOT_TOKEN не задан!", flush=True)
         return
-    print(f"[STARTUP] Бот запущен! Manager: {MANAGER_CHAT_ID}", flush=True)
+    print(f"[STARTUP] Бот запущен!", flush=True)
+    print(f"[STARTUP] MANAGER_CHAT_ID = {MANAGER_CHAT_ID or 'НЕ ЗАДАН — заявки некуда слать!'}", flush=True)
+    print(f"[STARTUP] OWNER_CHAT_ID   = {OWNER_CHAT_ID or 'не задан'}", flush=True)
     load_state()
 
     marker = None
