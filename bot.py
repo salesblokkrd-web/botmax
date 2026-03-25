@@ -165,6 +165,7 @@ def save_state():
             "user_data": {str(k): v for k, v in user_data.items()},
             "pending_replies": {str(k): v for k, v in pending_replies.items()},
             "order_summaries": {str(k): v for k, v in order_summaries.items()},
+            "user_chat_map": {str(k): v for k, v in user_chat_map.items()},
         }
         tmp = STATE_FILE + ".tmp"
         try:
@@ -186,6 +187,7 @@ def load_state():
         for k, v in data.get("pending_replies", {}).items():
             pending_replies[int(k)] = v if isinstance(v, dict) else {"client_id": int(v), "expires": 0, "summary": ""}
         order_summaries.update({int(k): v for k, v in data.get("order_summaries", {}).items()})
+        user_chat_map.update({int(k): v for k, v in data.get("user_chat_map", {}).items()})
         print(f"[STATE] Загружено: {len(user_state)} диалогов, {len(pending_replies)} ожидающих ответов", flush=True)
     except FileNotFoundError:
         pass
@@ -1128,7 +1130,12 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
     elif state == CONFIRM:
         t = text.lower().strip()
         if any(w in t for w in ["да", "верно", "отправить", "подтвержд", "ок", "ok", "yes", "✅"]):
-            finalize(chat_id)
+            send_msg(chat_id, "⏳ Принимаю заявку, рассчитываю маршрут...")
+            try:
+                finalize(chat_id)
+            except Exception as e:
+                print(f"[FINALIZE] Ошибка: {e}", flush=True)
+                send_msg(chat_id, "Произошла ошибка при оформлении. Напишите /start и попробуйте снова.")
             user_state.pop(chat_id, None)
             user_data.pop(chat_id, None)
             save_state()
@@ -1206,7 +1213,11 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         answer_cb(callback_id)
         if chat_id in user_data:
             send_msg(chat_id, "⏳ Принимаю заявку, рассчитываю маршрут...")
-            finalize(chat_id)
+            try:
+                finalize(chat_id)
+            except Exception as e:
+                print(f"[FINALIZE] Ошибка: {e}", flush=True)
+                send_msg(chat_id, "Произошла ошибка при оформлении. Напишите /start и попробуйте снова.")
             user_state.pop(chat_id, None)
             user_data.pop(chat_id, None)
             save_state()
