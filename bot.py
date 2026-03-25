@@ -822,7 +822,11 @@ def finalize(chat_id: int):
     order_summaries[chat_id] = f"{contact_name} | {product_str} | тел: {phone}"
 
     reply_btn = [[{"type": "callback", "text": "Ответить клиенту", "payload": f"reply_{chat_id}"}]]
-    send_msg(MANAGER_CHAT_ID, "\n".join(mgr), reply_btn)
+    mgr_result = send_msg(MANAGER_CHAT_ID, "\n".join(mgr), reply_btn)
+    if mgr_result.get("message"):
+        print(f"[FINALIZE] Менеджеру {MANAGER_CHAT_ID} отправлено ✓", flush=True)
+    else:
+        print(f"[FINALIZE] ОШИБКА отправки менеджеру {MANAGER_CHAT_ID}: {mgr_result}", flush=True)
     if map_url:
         try:
             send_photo_msg(MANAGER_CHAT_ID, map_url, f"Маршрут: {BASE_NAME} -> {address} (~{distance_km} км)")
@@ -832,7 +836,9 @@ def finalize(chat_id: int):
     # ── Владельцу (копия без кнопки ответа) ────────────────────────────────
     if OWNER_CHAT_ID and OWNER_CHAT_ID != MANAGER_CHAT_ID:
         owner_msg = "[Копия] " + "\n".join(mgr)
-        send_msg(OWNER_CHAT_ID, owner_msg)
+        owner_result = send_msg(OWNER_CHAT_ID, owner_msg)
+        if not owner_result.get("message"):
+            print(f"[FINALIZE] ОШИБКА отправки владельцу {OWNER_CHAT_ID}: {owner_result}", flush=True)
         if map_url:
             try:
                 send_photo_msg(OWNER_CHAT_ID, map_url, f"Маршрут: {BASE_NAME} -> {address} (~{distance_km} км)")
@@ -1069,7 +1075,13 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         tons = parse_tons(text, d.get("product"))
         if tons and tons > 0:
             d["tons"] = tons
-            d["volume_text"] = text
+            # Если ввод в кубах — сохраняем тонны и уведомляем клиента
+            if re.search(r'куб|м[³3]', text.lower()):
+                d["volume_text"] = f"{tons} т"
+                density = DENSITY.get(d.get("product", ""), DEFAULT_DENSITY)
+                send_msg(chat_id, f"Принял: {text} = {tons} тонн (плотность {density} т/м³)")
+            else:
+                d["volume_text"] = text
         else:
             try_parse_freeform(text, chat_id)
             if not d.get("tons"):
