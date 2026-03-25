@@ -1201,6 +1201,7 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
     if payload == "confirm_yes":
         answer_cb(callback_id)
         if chat_id in user_data:
+            send_msg(chat_id, "⏳ Принимаю заявку, рассчитываю маршрут...")
             finalize(chat_id)
             user_state.pop(chat_id, None)
             user_data.pop(chat_id, None)
