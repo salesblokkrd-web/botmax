@@ -947,7 +947,6 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         return
 
     if text.strip() == "/myid":
-        global MANAGER_CHAT_ID
         with open(MANAGER_ID_FILE, "w") as f:
             f.write(str(chat_id))
         MANAGER_CHAT_ID = chat_id
@@ -956,7 +955,6 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         return
 
     if text.strip() == "/ownerid":
-        global OWNER_CHAT_ID
         with open(OWNER_ID_FILE, "w") as f:
             f.write(str(chat_id))
         OWNER_CHAT_ID = chat_id
