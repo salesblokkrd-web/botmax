@@ -761,7 +761,7 @@ def finalize(chat_id: int):
     else:
         lines.append("Стоимость материала: уточнит менеджер")
     if delivery == "Доставка":
-        if distance_km is not None:
+        if distance_km is not None and delivery_cost is not None:
             lines.append(f"Стоимость доставки: ~{delivery_cost:,} руб. (~{distance_km} км)".replace(",", " "))
             if material_cost is not None:
                 lines.append(f"Итого: ~{material_cost + delivery_cost:,} руб.".replace(",", " "))
@@ -807,7 +807,7 @@ def finalize(chat_id: int):
     mgr.append(f"Получение: {delivery}")
     if delivery == "Доставка":
         mgr.append(f"Адрес: {address}")
-        if distance_km is not None:
+        if distance_km is not None and delivery_cost is not None:
             mgr.append(f"~{distance_km} км -> доставка ~{delivery_cost:,} руб.".replace(",", " "))
         elif geocode_failed:
             mgr.append("Расстояние: уточнить вручную")
