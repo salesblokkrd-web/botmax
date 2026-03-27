@@ -416,33 +416,53 @@ def parse_contacts_groq(text: str) -> ContactsParsed:
     return ContactsParsed(name=data.get("name"), company=data.get("company"), phone=data.get("phone"))
 
 
-# ─── Геокодирование и маршрутизация (идентично tg-bot) ───────────────────
+# ─── Геокодирование и маршрутизация ───────────────────────────────────────
+
+# Зона обслуживания: bounding box регионов (lat_min, lat_max, lon_min, lon_max)
+SERVICE_REGIONS = [
+    ("Краснодарский край",   43.40, 46.30, 36.60, 41.75),
+    ("Республика Адыгея",    43.75, 45.25, 38.80, 40.50),
+    ("Ростовская область",   45.85, 50.25, 38.10, 44.30),
+    ("Ставропольский край",  43.65, 46.25, 40.80, 45.35),
+]
+
+def _in_service_area(lat, lon):
+    """Проверяет, попадают ли координаты в зону обслуживания."""
+    for name, lat_min, lat_max, lon_min, lon_max in SERVICE_REGIONS:
+        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+            return name
+    return None
 
 def get_coords(address: str):
+    """Геокодирование с приоритетом: КК → Адыгея → Ростов → Ставрополье."""
     try:
         from geopy.geocoders import Nominatim
         geolocator = Nominatim(user_agent="quarry_delivery_bot_krd", timeout=5)
         parts = [p.strip() for p in address.split(",") if p.strip()]
         city_candidate = parts[0] if parts else address
-        city_only = city_candidate.split()[0] if city_candidate.split() else city_candidate
 
-        def in_russia(loc):
-            return 40.0 <= loc.latitude <= 80.0 and 25.0 <= loc.longitude <= 180.0
-
+        # Приоритет поиска: сначала КК и Адыгея, потом соседние регионы
         queries = [
             f"{address}, Краснодарский край, Россия",
             f"{city_candidate}, Краснодарский край, Россия",
-            f"{city_only}, Россия",
+            f"{address}, Республика Адыгея, Россия",
+            f"{city_candidate}, Республика Адыгея, Россия",
+            f"{address}, Ростовская область, Россия",
+            f"{address}, Ставропольский край, Россия",
         ]
         for query in queries:
             try:
                 loc = geolocator.geocode(query)
-                if loc and in_russia(loc):
-                    print(f"[GEOCODE] OK: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})", flush=True)
-                    return (loc.latitude, loc.longitude)
+                if loc:
+                    region = _in_service_area(loc.latitude, loc.longitude)
+                    if region:
+                        print(f"[GEOCODE] OK: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f}) [{region}]", flush=True)
+                        return (loc.latitude, loc.longitude)
+                    else:
+                        print(f"[GEOCODE] вне зоны: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})", flush=True)
             except Exception as e:
                 print(f"[GEOCODE] ошибка: {e}", flush=True)
-        print(f"[GEOCODE] не найдено: {address!r}", flush=True)
+        print(f"[GEOCODE] не найдено в зоне обслуживания: {address!r}", flush=True)
     except Exception as e:
         print(f"[GEOCODE] критическая ошибка: {e}", flush=True)
     return None
