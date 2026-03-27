@@ -792,6 +792,8 @@ def build_confirm_summary(d: dict) -> str:
     return "\n".join(lines)
 
 
+FUNNEL_NAMES = {PRODUCT: "product", VOLUME: "volume", DELIVERY: "delivery", ADDRESS: "address", CONTACTS: "contacts", PHONE_ONLY: "phone", CONFIRM: "confirm"}
+
 def advance(chat_id: int) -> int:
     """Определяет следующий шаг диалога. Возвращает состояние или -1 (конец)."""
     d = user_data.get(chat_id, {})
@@ -851,6 +853,7 @@ def advance(chat_id: int) -> int:
         {"type": "callback", "text": "❌ Начать заново", "payload": "confirm_no"},
     ]]
     send_msg(chat_id, f"Проверьте заявку:\n\n{summary}\n\nВсё верно?", btns)
+    track_event("funnel_step", chat_id=chat_id, step="confirm")
     return CONFIRM
 
 
@@ -1057,7 +1060,17 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         try:
             send_msg(client_id, f"Ответ менеджера:\n\n{text}")
             send_msg(chat_id, f"✅ Ответ отправлен клиенту.")
-            track_event("manager_replied", manager_id=user_id, client_id=client_id)
+            # Считаем время ответа менеджера
+            response_mins = None
+            try:
+                events = load_analytics(days=1)
+                order_events = [e for e in events if e.get("event") == "order_completed" and e.get("chat_id") == client_id]
+                if order_events:
+                    order_ts = max(e["ts"] for e in order_events)
+                    response_mins = round((time.time() - order_ts) / 60, 1)
+            except Exception:
+                pass
+            track_event("manager_replied", manager_id=user_id, client_id=client_id, response_mins=response_mins)
         except Exception as e:
             send_msg(chat_id, f"Не удалось отправить: {e}")
         save_state()
@@ -1096,6 +1109,36 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         delivery_count  = deliveries.count("Доставка")
         pickup_count    = deliveries.count("Самовывоз")
 
+        # Среднее время ответа менеджера
+        reply_events = [e for e in events_7d if e.get("event") == "manager_replied" and e.get("response_mins")]
+        if reply_events:
+            avg_resp = round(sum(e["response_mins"] for e in reply_events) / len(reply_events), 1)
+            max_resp = round(max(e["response_mins"] for e in reply_events), 1)
+            resp_str = f"  Среднее время ответа: {avg_resp} мин\n  Макс. время ответа: {max_resp} мин"
+        else:
+            resp_str = "  Время ответа: нет данных"
+
+        # Воронка за 7 дней
+        funnel_events = [e for e in events_7d if e.get("event") == "funnel_step"]
+        funnel_steps = {"product": 0, "volume": 0, "delivery": 0, "address": 0, "contacts": 0, "phone": 0, "confirm": 0}
+        seen_chats = {step: set() for step in funnel_steps}
+        for e in funnel_events:
+            step = e.get("step")
+            cid = e.get("chat_id")
+            if step in funnel_steps and cid:
+                seen_chats[step].add(cid)
+        for step in funnel_steps:
+            funnel_steps[step] = len(seen_chats[step])
+        funnel_str = (
+            f"  Товар: {funnel_steps['product']}\n"
+            f"  Объём: {funnel_steps['volume']}\n"
+            f"  Доставка: {funnel_steps['delivery']}\n"
+            f"  Адрес: {funnel_steps['address']}\n"
+            f"  Контакты: {funnel_steps['contacts'] + funnel_steps['phone']}\n"
+            f"  Подтверждение: {funnel_steps['confirm']}\n"
+            f"  Оформлено: {completed_7d}"
+        )
+
         msg = (
             f"Статистика бота (Max)\n\n"
             f"Сегодня:\n"
@@ -1109,6 +1152,8 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
             f"  Конверсия: {conv_7d}\n"
             f"  Ответов менеджера: {replied_7d}\n"
             f"  Доставка: {delivery_count} | Самовывоз: {pickup_count}\n\n"
+            f"Менеджер (7 дней):\n{resp_str}\n\n"
+            f"Воронка (7 дней):\n{funnel_str}\n\n"
             f"Топ товаров (7 дней):\n{top_str}"
         )
         send_msg(chat_id, msg)
@@ -1233,6 +1278,7 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         new_state = advance(chat_id)
         if new_state >= 0:
             user_state[chat_id] = new_state
+            track_event("funnel_step", chat_id=chat_id, step=FUNNEL_NAMES.get(new_state, str(new_state)))
         return
 
     # Обработка текущего состояния
@@ -1348,6 +1394,7 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
     new_state = advance(chat_id)
     if new_state >= 0:
         user_state[chat_id] = new_state
+        track_event("funnel_step", chat_id=chat_id, step=FUNNEL_NAMES.get(new_state, str(new_state)))
 
 
 def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
@@ -1523,6 +1570,91 @@ def process_update(update: dict):
 
 # ─── Главный цикл ─────────────────────────────────────────────────────────
 
+# ─── Еженедельный отчёт ────────────────────────────────────────────────────
+
+def build_weekly_report() -> str:
+    """Генерирует текст еженедельного отчёта."""
+    from collections import Counter
+    events = load_analytics(days=7)
+
+    def count(etype): return sum(1 for e in events if e.get("event") == etype)
+
+    started = count("conversation_started")
+    completed = count("order_completed")
+    replied = count("manager_replied")
+    conv = f"{round(completed/started*100)}%" if started else "—"
+
+    # Время ответа менеджера
+    reply_events = [e for e in events if e.get("event") == "manager_replied" and e.get("response_mins")]
+    if reply_events:
+        avg_resp = round(sum(e["response_mins"] for e in reply_events) / len(reply_events), 1)
+        max_resp = round(max(e["response_mins"] for e in reply_events), 1)
+        resp_str = f"  Среднее: {avg_resp} мин | Макс: {max_resp} мин"
+    else:
+        resp_str = "  нет данных"
+
+    # Воронка
+    funnel_events = [e for e in events if e.get("event") == "funnel_step"]
+    funnel_steps = {"product": set(), "volume": set(), "delivery": set(), "address": set(), "contacts": set(), "phone": set(), "confirm": set()}
+    for e in funnel_events:
+        step = e.get("step")
+        cid = e.get("chat_id")
+        if step in funnel_steps and cid:
+            funnel_steps[step].add(cid)
+    funnel_str = (
+        f"  Товар: {len(funnel_steps['product'])}\n"
+        f"  Объём: {len(funnel_steps['volume'])}\n"
+        f"  Доставка: {len(funnel_steps['delivery'])}\n"
+        f"  Адрес: {len(funnel_steps['address'])}\n"
+        f"  Контакты: {len(funnel_steps['contacts']) + len(funnel_steps['phone'])}\n"
+        f"  Подтверждение: {len(funnel_steps['confirm'])}\n"
+        f"  Оформлено: {completed}"
+    )
+
+    # Топ товаров
+    products = [e.get("product") for e in events if e.get("event") == "order_completed" and e.get("product")]
+    top = Counter(products).most_common(3)
+    top_str = "\n".join(f"  {p}: {n}" for p, n in top) or "  нет данных"
+
+    # Доставка vs самовывоз
+    deliveries = [e.get("delivery") for e in events if e.get("event") == "order_completed"]
+    d_count = deliveries.count("Доставка")
+    p_count = deliveries.count("Самовывоз")
+
+    return (
+        f"Еженедельный отчёт бота (Max)\n\n"
+        f"Диалоги: {started}\n"
+        f"Заявки оформлены: {completed}\n"
+        f"Конверсия: {conv}\n"
+        f"Ответов менеджера: {replied}\n"
+        f"Доставка: {d_count} | Самовывоз: {p_count}\n\n"
+        f"Время ответа менеджера:\n{resp_str}\n\n"
+        f"Воронка:\n{funnel_str}\n\n"
+        f"Топ товаров:\n{top_str}"
+    )
+
+
+def weekly_report_loop():
+    """Фоновый тред: отправляет отчёт владельцу по воскресеньям в 20:00 МСК."""
+    import datetime
+    last_sent_week = None
+    while True:
+        try:
+            # МСК = UTC+3
+            now_msk = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+            week_num = now_msk.isocalendar()[1]
+            # Воскресенье = 6 (weekday()), час >= 20
+            if now_msk.weekday() == 6 and now_msk.hour >= 20 and last_sent_week != week_num:
+                if OWNER_CHAT_ID:
+                    report = build_weekly_report()
+                    send_msg(OWNER_CHAT_ID, report)
+                    print(f"[WEEKLY] Отчёт отправлен владельцу {OWNER_CHAT_ID}", flush=True)
+                    last_sent_week = week_num
+        except Exception as e:
+            print(f"[WEEKLY] Ошибка: {e}", flush=True)
+        time.sleep(1800)  # проверяем каждые 30 минут
+
+
 def main():
     print("[STARTUP] Жду 45 сек перед запуском...", flush=True)
     time.sleep(45)
@@ -1533,6 +1665,11 @@ def main():
     print(f"[STARTUP] MANAGER_CHAT_ID = {MANAGER_CHAT_ID or 'НЕ ЗАДАН — заявки некуда слать!'}", flush=True)
     print(f"[STARTUP] OWNER_CHAT_ID   = {OWNER_CHAT_ID or 'не задан'}", flush=True)
     load_state()
+
+    # Запускаем фоновый тред для еженедельного отчёта
+    report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
+    report_thread.start()
+    print("[STARTUP] Еженедельный отчёт: воскресенье 20:00 МСК", flush=True)
 
     marker = None
     with ThreadPoolExecutor(max_workers=8) as pool:
