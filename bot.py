@@ -1200,6 +1200,28 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         print(f"[OWNERID] Владелец сохранён: {user_name} -> {chat_id}")
         return
 
+    if text.strip() in ("/menu", "/помощь", "/help", "меню"):
+        is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
+        is_manager = MANAGER_CHAT_ID and (chat_id == MANAGER_CHAT_ID or user_id == MANAGER_CHAT_ID)
+        btns = [
+            [{"type": "callback", "text": "Новая заявка", "payload": "/start"}],
+            [{"type": "callback", "text": "Отменить заявку", "payload": "/cancel"}],
+        ]
+        menu_text = (
+            "Меню бота:\n\n"
+            "/start — новая заявка\n"
+            "/cancel — отменить текущую заявку\n"
+        )
+        if is_manager or is_owner:
+            btns.append([{"type": "callback", "text": "Список заявок", "payload": "/заявки"}])
+            menu_text += "/заявки — последние заявки\n"
+        if is_owner:
+            btns.append([{"type": "callback", "text": "Статистика", "payload": "/stats"}])
+            menu_text += "/stats — статистика и воронка\n"
+        menu_text += "/menu — это меню"
+        send_msg(chat_id, menu_text, btns)
+        return
+
     if text.strip() in ("/cancel", "/отмена"):
         user_state.pop(chat_id, None)
         user_data.pop(chat_id, None)
@@ -1420,6 +1442,12 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         else:
             print(f"[VOICE_CB] entry not found in pending_voice", flush=True)
             answer_cb(callback_id)
+        return
+
+    # Кнопки меню
+    if payload in ("/start", "/cancel", "/заявки", "/stats", "/menu"):
+        answer_cb(callback_id)
+        handle_message(chat_id, payload, "", user_id=user_id)
         return
 
     if payload == "voice_retry":
