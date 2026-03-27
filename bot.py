@@ -265,6 +265,8 @@ def make_buttons(items: list) -> list:
 class OrderItem(BaseModel):
     product: Optional[str] = None
     tons: Optional[float] = None
+    raw_value: Optional[float] = None
+    unit: Optional[str] = None  # 'тонн' или 'куб'
 
 class OrderParsed(BaseModel):
     items: Optional[List[OrderItem]] = None
@@ -353,15 +355,12 @@ def parse_order_groq(text: str) -> OrderParsed:
                 "ВАЖНО: фракция щебня — два числа через дефис (5-20, 20-40, 40-70). "
                 "Если клиент пишет '7 5-20' — это 7 тонн щебня 5-20. "
                 "КРИТИЧНО: 520, 2040, 4070 — это НЕ тоннаж, это фракции слитно.\n"
-                "КУБЫ → ТОННЫ: если клиент указал кубометры/кубов/куб/м³ — переведи в тонны по насыпной плотности: "
-                "Отсев 0-5=1.27, Щебень 5-20=1.45, Щебень 20-40=1.42, Щебень 40-70=1.44, "
-                "Песок мелкозернистый=1.50, Песок крупнозернистый=1.50, Гравий=1.45, ГПС=1.77. "
-                "Если продукт неизвестен — умножай на 1.5. В tons всегда возвращай тонны.\n\n"
+                "НЕ конвертируй кубы в тонны! Верни число КАК ЕСТЬ и укажи единицу.\n\n"
                 "Верни JSON:\n"
-                "- items: [{\"product\": точное название или null, \"tons\": число или null}]\n"
+                "- items: [{\"product\": точное название или null, \"value\": число или null, \"unit\": \"тонн\" или \"куб\"}]\n"
                 "- delivery: «Доставка» или «Самовывоз» или null\n"
                 "- address: адрес или null\n"
-                "Пример: {\"items\": [{\"product\": \"Щебень 5-20\", \"tons\": 7}], \"delivery\": \"Доставка\", \"address\": \"Краснодар\"}"
+                "Пример: {\"items\": [{\"product\": \"Щебень 5-20\", \"value\": 7, \"unit\": \"тонн\"}], \"delivery\": \"Доставка\", \"address\": \"Краснодар\"}"
             )},
         ],
         temperature=0,
@@ -373,15 +372,25 @@ def parse_order_groq(text: str) -> OrderParsed:
     FRACTION_ARTIFACTS = {520, 2040, 4070, 520.0, 2040.0, 4070.0}
     items = []
     for it in (data.get("items") or []):
-        t = float(it["tons"]) if it.get("tons") else None
-        if t in FRACTION_ARTIFACTS:
-            t = None
-        items.append(OrderItem(product=it.get("product"), tons=t))
+        raw_val = float(it["value"]) if it.get("value") else (float(it["tons"]) if it.get("tons") else None)
+        unit = it.get("unit", "тонн")
+        if raw_val and raw_val in FRACTION_ARTIFACTS:
+            raw_val = None
+        # Конвертация кубов в тонны — в Python, не в LLM
+        product = it.get("product")
+        if raw_val and unit and re.match(r"куб", unit):
+            density = DENSITY.get(product, DEFAULT_DENSITY)
+            tons = round(raw_val * density, 1)
+            print(f"[PARSE] {raw_val} куб × {density} = {tons} т ({product})", flush=True)
+        else:
+            tons = raw_val
+        items.append(OrderItem(product=product, tons=tons, raw_value=raw_val, unit=unit))
     first = items[0] if items else OrderItem()
     return OrderParsed(
         items=items if items else None,
         product=first.product,
         tons=first.tons,
+        unit=first.unit,
         delivery=data.get("delivery"),
         address=data.get("address"),
     )
@@ -441,15 +450,31 @@ def get_coords(address: str):
         parts = [p.strip() for p in address.split(",") if p.strip()]
         city_candidate = parts[0] if parts else address
 
+        # Нормализация: "станица X" -> доп. вариант "ст. X" и просто "X"
+        addr_variants = [address]
+        city_variants = [city_candidate]
+        for prefix in ["станица ", "станицa ", "ст. ", "ст ", "хутор ", "посёлок ", "поселок ", "село ", "пос. ", "пос "]:
+            for src in [address.lower(), city_candidate.lower()]:
+                if src.startswith(prefix):
+                    short = src[len(prefix):].strip().capitalize()
+                    if short not in addr_variants:
+                        addr_variants.append(short)
+                    if short not in city_variants:
+                        city_variants.append(short)
+
         # Приоритет поиска: сначала КК и Адыгея, потом соседние регионы
-        queries = [
-            f"{address}, Краснодарский край, Россия",
-            f"{city_candidate}, Краснодарский край, Россия",
-            f"{address}, Республика Адыгея, Россия",
-            f"{city_candidate}, Республика Адыгея, Россия",
-            f"{address}, Ростовская область, Россия",
-            f"{address}, Ставропольский край, Россия",
-        ]
+        queries = []
+        for av in addr_variants:
+            queries.append(f"{av}, Краснодарский край, Россия")
+        for cv in city_variants:
+            if f"{cv}, Краснодарский край, Россия" not in queries:
+                queries.append(f"{cv}, Краснодарский край, Россия")
+        for av in addr_variants:
+            queries.append(f"{av}, Республика Адыгея, Россия")
+        for av in addr_variants:
+            queries.append(f"{av}, Ростовская область, Россия")
+        for av in addr_variants:
+            queries.append(f"{av}, Ставропольский край, Россия")
         for query in queries:
             try:
                 loc = geolocator.geocode(query)
@@ -578,7 +603,11 @@ def try_parse_freeform(text: str, chat_id: int) -> bool:
                 found = True
             if not d.get("tons"):
                 d["tons"] = it["tons"]
-                d["volume_text"] = f"{it['tons']} т"
+                raw_item = parsed.items[0] if parsed.items else None
+                if raw_item and raw_item.unit and re.match(r"куб", raw_item.unit) and raw_item.raw_value:
+                    d["volume_text"] = f"{raw_item.raw_value:.0f} м³ = {it['tons']} т"
+                else:
+                    d["volume_text"] = f"{it['tons']} т"
                 found = True
     elif parsed.product and parsed.product in PRODUCTS and not d.get("product"):
         d["product"] = parsed.product
@@ -586,7 +615,10 @@ def try_parse_freeform(text: str, chat_id: int) -> bool:
         found = True
     if parsed.tons and parsed.tons > 0 and not d.get("tons"):
         d["tons"] = parsed.tons
-        d["volume_text"] = f"{parsed.tons} т"
+        if parsed.unit and re.match(r"куб", parsed.unit) and parsed.items and parsed.items[0].raw_value:
+            d["volume_text"] = f"{parsed.items[0].raw_value:.0f} м³ = {parsed.tons} т"
+        else:
+            d["volume_text"] = f"{parsed.tons} т"
         found = True
     if parsed.delivery and not d.get("delivery"):
         d["delivery"] = parsed.delivery
