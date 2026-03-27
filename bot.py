@@ -1203,14 +1203,17 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
     if text.strip() in ("/menu", "/помощь", "/help", "меню"):
         is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
         is_manager = MANAGER_CHAT_ID and (chat_id == MANAGER_CHAT_ID or user_id == MANAGER_CHAT_ID)
+        if not is_owner and not is_manager:
+            send_msg(chat_id, "Напишите что вам нужно или /start для новой заявки.")
+            return
         btns = [
             [{"type": "callback", "text": "Новая заявка", "payload": "/start"}],
             [{"type": "callback", "text": "Отменить заявку", "payload": "/cancel"}],
         ]
         menu_text = (
-            "Меню бота:\n\n"
+            "Меню:\n\n"
             "/start — новая заявка\n"
-            "/cancel — отменить текущую заявку\n"
+            "/cancel — отменить текущую\n"
         )
         if is_manager or is_owner:
             btns.append([{"type": "callback", "text": "Список заявок", "payload": "/заявки"}])
