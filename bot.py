@@ -423,6 +423,7 @@ def parse_order_groq(text: str) -> OrderParsed:
     # Определяем единицу из исходного текста (fallback если LLM не вернула unit)
     text_lower = text.lower()
     text_has_cubes = bool(re.search(r'куб|м[³3]|кубометр|кубов', text_lower))
+    text_has_volume = bool(re.search(r'тысяч|тонн|куб|м[³3]', text_lower))
     print(f"[GROQ] raw JSON: {raw}", flush=True)
     items = []
     for it in (data.get("items") or []):
@@ -431,7 +432,8 @@ def parse_order_groq(text: str) -> OrderParsed:
         # Fallback: если LLM не вернула unit — определяем из текста
         if not unit:
             unit = "куб" if text_has_cubes else "тонн"
-        if raw_val and raw_val in FRACTION_ARTIFACTS:
+        # 520/2040/4070 — артефакты ТОЛЬКО если в тексте нет явного объёма (тысяч, тонн, кубов)
+        if raw_val and raw_val in FRACTION_ARTIFACTS and not text_has_volume:
             raw_val = None
         # Конвертация кубов в тонны — в Python, не в LLM
         product = it.get("product")
@@ -486,6 +488,39 @@ def parse_contacts_groq(text: str) -> ContactsParsed:
 # ─── Геокодирование и маршрутизация ───────────────────────────────────────
 
 # Зона обслуживания: bounding box регионов (lat_min, lat_max, lon_min, lon_max)
+# Координаты местных населённых пунктов (Nominatim не всегда знает станицы КК)
+LOCAL_COORDS = {
+    "весёловская": (44.8833, 39.7500),    # ст. Весёловская, Белореченский р-н
+    "веселовская": (44.8833, 39.7500),
+    "архиповское": (44.9928, 39.8387),    # с. Архиповское (карьер)
+    "белореченск": (44.7667, 39.8833),
+    "гиагинская": (44.8667, 40.0333),     # ст. Гиагинская, Адыгея
+    "ханская": (44.6333, 40.1833),         # ст. Ханская
+    "рязанская": (44.9500, 39.6500),       # ст. Рязанская
+    "пшехская": (44.8167, 39.7000),        # ст. Пшехская
+    "бжедуховская": (44.7833, 39.4667),    # ст. Бжедуховская
+    "черниговская": (44.6833, 39.4833),    # ст. Черниговская
+    "апшеронск": (44.4667, 39.7333),
+    "лабинск": (44.6333, 40.7333),
+    "курганинск": (44.8833, 40.6000),
+    "майкоп": (44.6000, 40.1000),
+    "кропоткин": (45.4333, 40.5667),
+    "армавир": (44.9833, 41.1167),
+    "усть-лабинск": (45.2167, 39.6833),
+    "тихорецк": (45.8500, 40.1167),
+    "гулькевичи": (45.3500, 40.6833),
+    "мостовской": (44.4167, 40.7833),
+}
+
+def _lookup_local(address: str):
+    """Ищет адрес в словаре известных координат."""
+    addr_lower = address.lower()
+    for name, coords in LOCAL_COORDS.items():
+        if name in addr_lower:
+            print(f"[GEOCODE] LOCAL: '{name}' найдено в '{address}' -> {coords}", flush=True)
+            return coords
+    return None
+
 SERVICE_REGIONS = [
     ("Краснодарский край",   43.40, 46.30, 36.60, 41.75),
     ("Республика Адыгея",    43.75, 45.25, 38.80, 40.50),
@@ -501,8 +536,12 @@ def _in_service_area(lat, lon):
     return None
 
 def get_coords(address: str):
-    """Геокодирование с приоритетом: КК → Адыгея → Ростов → Ставрополье."""
+    """Геокодирование с приоритетом: локальный словарь → КК → Адыгея → Ростов → Ставрополье."""
     address = fix_whisper_typos(address)
+    # Сначала ищем в локальном словаре (быстро и точно)
+    local = _lookup_local(address)
+    if local:
+        return local
     try:
         from geopy.geocoders import Nominatim
         geolocator = Nominatim(user_agent="quarry_delivery_bot_krd", timeout=5)
