@@ -68,6 +68,56 @@ DENSITY = {
 }
 DEFAULT_DENSITY = 1.5
 
+# Исправления ошибок распознавания Whisper для местных топонимов
+WHISPER_FIXES = {
+    "лобинск": "Лабинск",
+    "лобинске": "Лабинске",
+    "лобинска": "Лабинска",
+    "белоречинск": "Белореченск",
+    "белоречинске": "Белореченске",
+    "кропоткин": "Кропоткин",
+    "майком": "Майкоп",
+    "майкоб": "Майкоп",
+    "армовир": "Армавир",
+    "армовире": "Армавире",
+    "курганинск": "Курганинск",
+    "тихарецк": "Тихорецк",
+    "тихарецке": "Тихорецке",
+    "гулькевичи": "Гулькевичи",
+    "усть-лобинск": "Усть-Лабинск",
+    "усть-лобинске": "Усть-Лабинске",
+    "апшеронск": "Апшеронск",
+    "мостовский": "Мостовской",
+    "мостовском": "Мостовском",
+    "веселовская": "Весёловская",
+    "веселовской": "Весёловской",
+}
+
+def fix_whisper_typos(text: str) -> str:
+    """Исправляет типичные ошибки Whisper в названиях населённых пунктов."""
+    words = text.split()
+    fixed = []
+    for w in words:
+        low = w.lower().strip(".,!?;:")
+        if low in WHISPER_FIXES:
+            prefix = ""
+            suffix = ""
+            for ch in w:
+                if ch.isalpha() or ch == "-":
+                    break
+                prefix += ch
+            for ch in reversed(w):
+                if ch.isalpha() or ch == "-":
+                    break
+                suffix = ch + suffix
+            fixed.append(prefix + WHISPER_FIXES[low] + suffix)
+        else:
+            fixed.append(w)
+    result = " ".join(fixed)
+    if result != text:
+        print(f"[WHISPER_FIX] \'{text}\' -> \'{result}\'", flush=True)
+    return result
+
 PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY, CONFIRM = range(7)
 
 # State machine (вместо ConversationHandler из PTB)
@@ -397,6 +447,7 @@ def parse_order_groq(text: str) -> OrderParsed:
 
 
 def parse_order(text: str) -> OrderParsed:
+    text = fix_whisper_typos(text)
     if GROQ_API_KEY:
         try:
             return parse_order_groq(text)
@@ -444,6 +495,7 @@ def _in_service_area(lat, lon):
 
 def get_coords(address: str):
     """Геокодирование с приоритетом: КК → Адыгея → Ростов → Ставрополье."""
+    address = fix_whisper_typos(address)
     try:
         from geopy.geocoders import Nominatim
         geolocator = Nominatim(user_agent="quarry_delivery_bot_krd", timeout=5)
