@@ -420,10 +420,17 @@ def parse_order_groq(text: str) -> OrderParsed:
     raw = re.sub(r"```[a-z]*\n?", "", raw).strip("` \n")
     data = json.loads(raw)
     FRACTION_ARTIFACTS = {520, 2040, 4070, 520.0, 2040.0, 4070.0}
+    # Определяем единицу из исходного текста (fallback если LLM не вернула unit)
+    text_lower = text.lower()
+    text_has_cubes = bool(re.search(r'куб|м[³3]|кубометр|кубов', text_lower))
+    print(f"[GROQ] raw JSON: {raw}", flush=True)
     items = []
     for it in (data.get("items") or []):
         raw_val = float(it["value"]) if it.get("value") else (float(it["tons"]) if it.get("tons") else None)
-        unit = it.get("unit", "тонн")
+        unit = it.get("unit")
+        # Fallback: если LLM не вернула unit — определяем из текста
+        if not unit:
+            unit = "куб" if text_has_cubes else "тонн"
         if raw_val and raw_val in FRACTION_ARTIFACTS:
             raw_val = None
         # Конвертация кубов в тонны — в Python, не в LLM
@@ -514,26 +521,48 @@ def get_coords(address: str):
                     if short not in city_variants:
                         city_variants.append(short)
 
-        # Приоритет поиска: сначала КК и Адыгея, потом соседние регионы
-        queries = []
+        # Группы запросов по приоритету: КК → Адыгея → Ростов → Ставрополье
+        # Внутри КК: сначала с районами (точнее), потом без
+        kk_queries = []
         for av in addr_variants:
-            queries.append(f"{av}, Краснодарский край, Россия")
+            kk_queries.append(f"{av}, Белореченский район, Краснодарский край, Россия")
+        for av in addr_variants:
+            kk_queries.append(f"{av}, Краснодарский край, Россия")
         for cv in city_variants:
-            if f"{cv}, Краснодарский край, Россия" not in queries:
-                queries.append(f"{cv}, Краснодарский край, Россия")
+            q = f"{cv}, Краснодарский край, Россия"
+            if q not in kk_queries:
+                kk_queries.append(q)
+
+        other_queries = []
         for av in addr_variants:
-            queries.append(f"{av}, Республика Адыгея, Россия")
+            other_queries.append(f"{av}, Республика Адыгея, Россия")
         for av in addr_variants:
-            queries.append(f"{av}, Ростовская область, Россия")
+            other_queries.append(f"{av}, Ростовская область, Россия")
         for av in addr_variants:
-            queries.append(f"{av}, Ставропольский край, Россия")
-        for query in queries:
+            other_queries.append(f"{av}, Ставропольский край, Россия")
+
+        # Сначала ищем ТОЛЬКО в КК
+        for query in kk_queries:
             try:
                 loc = geolocator.geocode(query)
                 if loc:
                     region = _in_service_area(loc.latitude, loc.longitude)
                     if region:
-                        print(f"[GEOCODE] OK: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f}) [{region}]", flush=True)
+                        print(f"[GEOCODE] OK (КК): {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f}) [{region}]", flush=True)
+                        return (loc.latitude, loc.longitude)
+                    else:
+                        print(f"[GEOCODE] вне зоны: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})", flush=True)
+            except Exception as e:
+                print(f"[GEOCODE] ошибка: {e}", flush=True)
+
+        # Если в КК не нашли — ищем в соседних регионах
+        for query in other_queries:
+            try:
+                loc = geolocator.geocode(query)
+                if loc:
+                    region = _in_service_area(loc.latitude, loc.longitude)
+                    if region:
+                        print(f"[GEOCODE] OK (сосед): {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f}) [{region}]", flush=True)
                         return (loc.latitude, loc.longitude)
                     else:
                         print(f"[GEOCODE] вне зоны: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})", flush=True)
@@ -1179,17 +1208,19 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         tons = parse_tons(text, d.get("product"))
         if tons and tons > 0:
             d["tons"] = tons
-            # Если ввод в кубах — сохраняем тонны и уведомляем клиента
-            if re.search(r'куб|м[³3]', text.lower()):
-                d["volume_text"] = f"{tons} т"
+            # Если ввод в кубах — показываем конвертацию
+            m_vol = re.search(r"(\d+[.,]?\d*)\s*(куб\w*|м[³3]|кубометр\w*)", text.lower())
+            if m_vol:
+                raw_cubes = float(m_vol.group(1).replace(",", "."))
                 density = DENSITY.get(d.get("product", ""), DEFAULT_DENSITY)
-                send_msg(chat_id, f"Принял: {text} = {tons} тонн (плотность {density} т/м³)")
+                d["volume_text"] = f"{raw_cubes:.0f} м³ = {tons} т"
+                send_msg(chat_id, f"Принял: {raw_cubes:.0f} м³ × {density} т/м³ = {tons} тонн")
             else:
-                d["volume_text"] = text
+                d["volume_text"] = f"{tons} т"
         else:
             try_parse_freeform(text, chat_id)
             if not d.get("tons"):
-                send_msg(chat_id, "Пожалуйста, укажите объём числом, например: 30 или 15.5")
+                send_msg(chat_id, "Пожалуйста, укажите объём числом, например: 30 тонн или 20 кубов")
                 return
 
     elif state == DELIVERY:
