@@ -152,6 +152,7 @@ REPLY_TIMEOUT = 30 * 60  # 30 минут
 
 # ─── Блокировки для многопоточности ────────────────────────────────────────
 _save_lock = threading.Lock()          # защита записи bot_state.json
+_voice_lock = threading.Lock()         # защита pending_voice
 _user_locks: dict = {}                 # chat_id -> Lock (один поток на пользователя)
 _user_locks_guard = threading.Lock()   # защита самого словаря _user_locks
 
@@ -1054,8 +1055,14 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         expires = entry.get("expires", 0) if isinstance(entry, dict) else 0
         summary = entry.get("summary", "") if isinstance(entry, dict) else ""
         if expires and time.time() > expires:
+            # Таймаут, но всё равно отправляем — не теряем сообщение менеджера
+            try:
+                send_msg(client_id, f"Ответ менеджера:\n\n{text}")
+                send_msg(chat_id, f"✅ Ответ отправлен клиенту (сессия истекла, но сообщение доставлено).")
+                track_event("manager_replied", manager_id=user_id, client_id=client_id, response_mins=None)
+            except Exception as e:
+                send_msg(chat_id, f"Не удалось отправить: {e}")
             save_state()
-            send_msg(chat_id, f"⏱ Время ожидания истекло (30 мин). Нажмите кнопку «Ответить клиенту» снова.")
             return
         try:
             send_msg(client_id, f"Ответ менеджера:\n\n{text}")
@@ -1435,7 +1442,8 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
 
     if payload == "voice_ok":
         print(f"[VOICE_CB] voice_ok: user_id={user_id}, chat_id={chat_id}, pending_keys={list(pending_voice.keys())}", flush=True)
-        entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
+        with _voice_lock:
+            entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
         if entry:
             transcribed, uname, uid, orig_chat_id = entry
             print(f"[VOICE_CB] found entry, orig_chat_id={orig_chat_id}, transcribed={transcribed!r}", flush=True)
@@ -1454,8 +1462,9 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         return
 
     if payload == "voice_retry":
-        entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
-        orig_chat_id = entry[3] if entry else (chat_id or user_id)
+        with _voice_lock:
+            entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
+        orig_chat_id = entry[3] if (entry and len(entry) > 3) else (chat_id or user_id)
         answer_cb(callback_id)
         send_msg(orig_chat_id, "Хорошо, отправьте голосовое ещё раз.")
         return
@@ -1566,9 +1575,10 @@ def process_update(update: dict):
                 if audio_url and GROQ_API_KEY:
                     transcribed = transcribe_voice_url(audio_url)
                     if transcribed:
-                        pending_voice[chat_id] = (transcribed, user_name, user_id, chat_id)
-                        if user_id and user_id != chat_id:
-                            pending_voice[user_id] = (transcribed, user_name, user_id, chat_id)
+                        with _voice_lock:
+                            pending_voice[chat_id] = (transcribed, user_name, user_id, chat_id)
+                            if user_id and user_id != chat_id:
+                                pending_voice[user_id] = (transcribed, user_name, user_id, chat_id)
                         btns = [[
                             {"type": "callback", "text": "✅ Всё правильно", "payload": "voice_ok"},
                             {"type": "callback", "text": "🔄 Повторить", "payload": "voice_retry"},
