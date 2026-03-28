@@ -990,9 +990,10 @@ def finalize(chat_id: int):
         "",
         "Благодарим, что выбрали Архиповский карьер!",
         "Для новой заявки нажмите кнопку ниже",
-            [[{"type": "callback", "text": "📋 Новая заявка", "payload": "/start"}]],
+
     ]
-    send_msg(chat_id, "\n".join(lines))
+    new_order_btn = [[{"type": "callback", "text": "📋 Новая заявка", "payload": "/start"}]]
+    send_msg(chat_id, "\n".join(lines), new_order_btn)
     if map_url:
         try:
             send_photo_msg(chat_id, map_url, f"Маршрут: {BASE_NAME} -> {address} (~{distance_km} км)")
