@@ -51,8 +51,8 @@ PRODUCTS = {
     "Песок мелкозернистый":  233,
     "Песок крупнозернистый": 566,
     "Гравий":                240,
-    "ГПС плохой":            75,
-    "ГПС хороший":           160,
+    "ГПС эконом":            75,
+    "ГПС премиум":           160,
 }
 
 DENSITY = {
@@ -63,10 +63,29 @@ DENSITY = {
     "Песок мелкозернистый":  1.50,
     "Песок крупнозернистый": 1.50,
     "Гравий":                1.45,
-    "ГПС плохой":            1.77,
-    "ГПС хороший":           1.77,
+    "ГПС эконом":            1.77,
+    "ГПС премиум":           1.77,
 }
 DEFAULT_DENSITY = 1.5
+
+# Склонение названий товаров (родительный падеж)
+PRODUCT_GENITIVE = {
+    "Отсев 0-5": "отсева 0-5",
+    "Щебень 5-20": "щебня 5-20",
+    "Щебень 20-40": "щебня 20-40",
+    "Щебень 40-70": "щебня 40-70",
+    "Песок мелкозернистый": "песка мелкозернистого",
+    "Песок крупнозернистый": "песка крупнозернистого",
+    "Гравий": "гравия",
+    "ГПС эконом": "ГПС эконом",
+    "ГПС премиум": "ГПС премиум",
+}
+
+def product_genitive(name):
+    """Возвращает название товара в родительном падеже."""
+    return PRODUCT_GENITIVE.get(name, name)
+
+
 
 # Исправления ошибок распознавания Whisper для местных топонимов
 WHISPER_FIXES = {
@@ -143,7 +162,8 @@ def fix_whisper_typos(text: str) -> str:
 PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY, CONFIRM = range(7)
 
 # State machine (вместо ConversationHandler из PTB)
-user_state: dict = {}   # chat_id -> int (состояние)
+user_state: dict = {}
+saved_contacts: dict = {}  # chat_id -> {"contact_name": ..., "phone": ..., "address": ...}   # chat_id -> int (состояние)
 user_data: dict = {}    # chat_id -> dict (данные заявки)
 pending_replies: dict = {}  # manager_id -> {"client_id": int, "expires": float, "summary": str}
 order_summaries: dict = {}  # client_id -> краткий саммари заявки для менеджера
@@ -372,13 +392,13 @@ def parse_order_regex(text: str) -> OrderParsed:
             (r'щебень.*?40-70|40-70.*?щебень|\b40-70\b', "Щебень 40-70"),
             (r'\bотсев\b', "Отсев 0-5"),
             (r'гравий', "Гравий"),
-            (r'гпс.*?плох|плох.*?гпс', "ГПС плохой"),
-            (r'гпс.*?хор|хор.*?гпс', "ГПС хороший"),
-            (r'\bгпс\b', "ГПС хороший"),
+            (r'гпс.*?плох|плох.*?гпс', "ГПС эконом"),
+            (r'гпс.*?хор|хор.*?гпс', "ГПС премиум"),
+            (r'\bгпс\b', "ГПС премиум"),
             (r'песок.*?мелк|мелк.*?песок', "Песок мелкозернистый"),
             (r'песок.*?круп|круп.*?песок', "Песок крупнозернистый"),
             (r'\bпесок\b', "Песок мелкозернистый"),
-            (r'\bщебень\b', "Щебень 5-20"),
+            (r'\bщебень\b', None)  # не подставляем фракцию — спросим у клиента,
         ]
         for pat, name in patterns:
             if re.search(pat, t_norm):
@@ -813,7 +833,7 @@ def advance(chat_id: int) -> int:
         return PRODUCT
 
     if not d.get("tons"):
-        send_msg(chat_id, f"Сколько тонн {d['product']} вам нужно?\n\nНапример: 30 тонн")
+        send_msg(chat_id, f"Сколько тонн {product_genitive(d['product'])} вам нужно?\n\nНапример: 30 тонн")
         return VOLUME
 
     if not d.get("delivery"):
@@ -859,6 +879,7 @@ def advance(chat_id: int) -> int:
     summary = build_confirm_summary(user_data.get(chat_id, {}))
     btns = [[
         {"type": "callback", "text": "✅ Отправить заявку", "payload": "confirm_yes"},
+        {"type": "callback", "text": "✏️ Изменить", "payload": "confirm_edit"},
         {"type": "callback", "text": "❌ Начать заново", "payload": "confirm_no"},
     ]]
     send_msg(chat_id, f"Проверьте заявку:\n\n{summary}\n\nВсё верно?", btns)
@@ -968,7 +989,8 @@ def finalize(chat_id: int):
         f"Рабочие часы: {WORK_HOURS}",
         "",
         "Благодарим, что выбрали Архиповский карьер!",
-        "Для новой заявки напишите /start",
+        "Для новой заявки нажмите кнопку ниже",
+            [[{"type": "callback", "text": "📋 Новая заявка", "payload": "/start"}]],
     ]
     send_msg(chat_id, "\n".join(lines))
     if map_url:
@@ -1227,6 +1249,7 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         ]
         menu_text = (
             "Меню:\n\n"
+            "/price — прайс-лист\n"
             "/start — новая заявка\n"
             "/cancel — отменить текущую\n"
         )
@@ -1238,6 +1261,10 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
             menu_text += "/stats — статистика и воронка\n"
         menu_text += "/menu — это меню"
         send_msg(chat_id, menu_text, btns)
+        return
+
+    if text.strip() in ("/price", "/прайс", "/цены", "прайс", "цены"):
+        send_msg(chat_id, _format_price_list())
         return
 
     if text.strip() in ("/cancel", "/отмена"):
@@ -1513,6 +1540,65 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
             save_state()
         return
 
+    if payload == "use_saved_contacts":
+        d = user_state.get(chat_id, {})
+        saved = saved_contacts.get(chat_id, {})
+        d["contact_name"] = saved.get("contact_name", "")
+        d["phone"] = saved.get("phone", "")
+        if saved.get("address") and not d.get("address"):
+            d["address"] = saved["address"]
+        advance(chat_id, d)
+        return
+
+    if payload == "new_contacts":
+        d = user_state.get(chat_id, {})
+        d["step"] = "CONTACTS"
+        send_msg(
+            chat_id,
+            "Напишите имя, организацию (если есть) и номер телефона."
+        )
+        return
+
+    if payload == "confirm_edit":
+        d = user_state.get(chat_id, {})
+        edit_btns = []
+        if d.get("product"):
+            edit_btns.append([{"type": "callback", "text": "Товар", "payload": "edit_product"}])
+        if d.get("tons"):
+            edit_btns.append([{"type": "callback", "text": "Объём", "payload": "edit_volume"}])
+        if d.get("delivery"):
+            edit_btns.append([{"type": "callback", "text": "Доставка/Самовывоз", "payload": "edit_delivery"}])
+        if d.get("address"):
+            edit_btns.append([{"type": "callback", "text": "Адрес", "payload": "edit_address"}])
+        if d.get("phone"):
+            edit_btns.append([{"type": "callback", "text": "Телефон", "payload": "edit_phone"}])
+        send_msg(chat_id, "Что изменить?", edit_btns)
+        return
+
+    # Обработка конкретных edit_*
+    if payload.startswith("edit_"):
+        d = user_state.get(chat_id, {})
+        field = payload.replace("edit_", "")
+        if field == "product":
+            d.pop("product", None)
+            d.pop("price_per_ton", None)
+            d["step"] = "PRODUCT"
+        elif field == "volume":
+            d.pop("tons", None)
+            d["step"] = "VOLUME"
+        elif field == "delivery":
+            d.pop("delivery", None)
+            d["step"] = "DELIVERY"
+        elif field == "address":
+            d.pop("address", None)
+            d["step"] = "ADDRESS"
+        elif field == "phone":
+            d.pop("phone", None)
+            d.pop("contact_name", None)
+            d["step"] = "CONTACTS"
+        advance(chat_id, user_state.get(chat_id, {}))
+        return
+
     if payload == "confirm_no":
         answer_cb(callback_id)
         user_state.pop(chat_id, None)
@@ -1596,6 +1682,13 @@ def process_update(update: dict):
                         send_msg(chat_id, "Не смог распознать голосовое. Пожалуйста, напишите текстом.")
                 else:
                     send_msg(chat_id, "Голосовые сообщения пока не поддерживаются. Напишите текстом.")
+                return
+
+        # Фото/стикер/файл без текста и без голоса — подсказка
+        if attachments and not text:
+            has_voice_att = any(a.get("type","") in VOICE_TYPES for a in attachments)
+            if not has_voice_att:
+                send_msg(chat_id, "Я понимаю текст и голосовые сообщения. Напишите или наговорите что вам нужно 🙂")
                 return
 
         if text:
@@ -1702,6 +1795,26 @@ def weekly_report_loop():
         except Exception as e:
             print(f"[WEEKLY] Ошибка: {e}", flush=True)
         time.sleep(1800)  # проверяем каждые 30 минут
+
+
+# ─── Прайс-лист ───────────────────────────────────────────────────────────
+
+def _format_price_list():
+    """Формирует прайс-лист для отправки."""
+    lines = ["📋 <b>Прайс-лист Архиповского карьера</b>\n"]
+    lines.append("<b>Материал | Цена за тонну</b>")
+    lines.append("─" * 30)
+    for product, price in PRODUCTS.items():
+        if price is not None:
+            lines.append(f"▸ {product} — <b>{price} ₽/т</b>")
+        else:
+            lines.append(f"▸ {product} — <b>по запросу</b>")
+    lines.append("─" * 30)
+    lines.append("\n🚚 Доставка от 30 тонн — рассчитывается по расстоянию")
+    lines.append(f"📍 {BASE_NAME}")
+    lines.append(f"🕐 {WORK_HOURS}")
+    lines.append("\n💬 Для заказа напишите что вам нужно или /start")
+    return "\n".join(lines)
 
 
 def main():
