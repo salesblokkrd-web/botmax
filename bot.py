@@ -889,14 +889,18 @@ def advance(chat_id: int) -> int:
 
     if d.get("delivery") == "Доставка":
         tons = d.get("tons", 0)
-        if tons < 30:
-            d.pop("delivery", None)
-            d.pop("tons", None)
-            d.pop("volume_text", None)
+        if tons < 30 and not d.get("delivery_warning_shown"):
+            d["delivery_warning_shown"] = True
+            btns = [
+                [{"type": "callback", "text": "Самовывоз", "payload": "Самовывоз"}],
+                [{"type": "callback", "text": "Всё равно доставка", "payload": "force_delivery"}],
+            ]
             send_msg(chat_id,
-                f"Доставка возможна от 30 тонн — минимальная загрузка машины.\n\n"
-                f"Вы указали {tons} т. Укажите новый объём (например: 30 тонн, 2 машины) или напишите «самовывоз».")
-            return VOLUME
+                f"Обычно доставка от 30 тонн (загрузка машины).\n\n"
+                f"Вы указали {tons} т — доставка возможна, но стоимость за тонну будет выше.\n\n"
+                f"Продолжить с доставкой или заберёте самовывозом?",
+                btns)
+            return DELIVERY
         if not d.get("address"):
             send_msg(chat_id, "Куда доставить? Укажите адрес (город, улица, дом) — рассчитаем стоимость.")
             return ADDRESS
@@ -1577,6 +1581,17 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         except Exception as e:
             print(f"[REPLY] Ошибка: {e}")
             answer_cb(callback_id, "Напишите ответ — он будет переслан клиенту")
+        return
+
+    if payload == "force_delivery":
+        answer_cb(callback_id)
+        d = user_data.get(chat_id, {})
+        d["delivery"] = "Доставка"
+        d["delivery_warning_shown"] = True
+        user_data[chat_id] = d
+        new_state = advance(chat_id)
+        if new_state >= 0:
+            user_state[chat_id] = new_state
         return
 
     if payload == "confirm_yes":
