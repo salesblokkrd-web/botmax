@@ -413,7 +413,7 @@ def parse_order_regex(text: str) -> OrderParsed:
                 if not result.tons:
                     result.tons = float(m_frac.group(1))
                 break
-    m = re.search(r'(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|куб\w*|м[³3])', t)
+    m = re.search(r'(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|куб\w*|м[³3]|машин\w*)', t)
     if m:
         val = float(m.group(1).replace(",", "."))
         unit_str = m.group(2)
@@ -421,6 +421,9 @@ def parse_order_regex(text: str) -> OrderParsed:
             result.unit = 'куб'
             density = DENSITY.get(result.product, DEFAULT_DENSITY)
             result.tons = round(val * density, 1)
+        elif re.match(r'машин', unit_str):
+            result.unit = 'тонн'
+            result.tons = round(val * 30)  # 1 машина ≈ 30 тонн
         else:
             result.unit = 'тонн'
             result.tons = val
@@ -850,13 +853,13 @@ def advance(chat_id: int) -> int:
         tons = d.get("tons", 0)
         if tons < 30:
             d.pop("delivery", None)
-            btns = [[
-                {"type": "callback", "text": "Самовывоз", "payload": "Самовывоз"},
-                {"type": "callback", "text": "Доставка", "payload": "Доставка"}
-            ]]
+            btns = [
+                [{"type": "callback", "text": "Самовывоз", "payload": "Самовывоз"}],
+                [{"type": "callback", "text": "Изменить объём", "payload": "edit_volume"}],
+            ]
             send_msg(chat_id,
                 f"Доставка возможна от 30 тонн — минимальная загрузка машины.\n\n"
-                f"Вы указали {tons} т. Заберёте самовывозом или скорректируем объём?",
+                f"Вы указали {tons} т. Заберёте самовывозом или напишите новый объём (например: 30 тонн).",
                 btns)
             return DELIVERY
         if not d.get("address"):
@@ -1394,7 +1397,21 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         elif text in ("Самовывоз", "Доставка"):
             d["delivery"] = text
         else:
-            try_parse_freeform(text, chat_id)
+            # Попробуем распознать новый объём (если пользователь корректирует)
+            vol_match = re.search(r"(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|куб\w*|м[³3]|машин\w*)", t)
+            if vol_match:
+                val = float(vol_match.group(1).replace(",", "."))
+                unit_str = vol_match.group(2)
+                if re.match(r"машин", unit_str):
+                    val = val * 30  # 1 машина ≈ 30 тонн
+                elif re.match(r"куб|м[³3]", unit_str):
+                    val = round(val * 1.4)  # приблизительная конверсия
+                d["tons"] = val
+                d["volume_text"] = f"{val:.0f} т"
+                send_msg(chat_id, f"Объём обновлён: {val:.0f} т")
+                # Не устанавливаем delivery — advance() спросит снова
+            else:
+                try_parse_freeform(text, chat_id)
             if not d.get("delivery"):
                 send_msg(chat_id, "Уточните: самовывоз или доставка?")
                 return
