@@ -1559,18 +1559,27 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         return
 
     if payload == "use_saved_contacts":
-        d = user_state.get(chat_id, {})
+        answer_cb(callback_id)
+        d = user_data.get(chat_id, {})
         saved = saved_contacts.get(chat_id, {})
         d["contact_name"] = saved.get("contact_name", "")
         d["phone"] = saved.get("phone", "")
         if saved.get("address") and not d.get("address"):
             d["address"] = saved["address"]
-        advance(chat_id, d)
+        user_data[chat_id] = d
+        new_state = advance(chat_id)
+        if new_state >= 0:
+            user_state[chat_id] = new_state
         return
 
     if payload == "new_contacts":
-        d = user_state.get(chat_id, {})
-        d["step"] = "CONTACTS"
+        answer_cb(callback_id)
+        d = user_data.get(chat_id, {})
+        d.pop("contact_name", None)
+        d.pop("phone", None)
+        d.pop("contacts_asked", None)
+        user_data[chat_id] = d
+        user_state[chat_id] = CONTACTS
         send_msg(
             chat_id,
             "Напишите имя, организацию (если есть) и номер телефона."
@@ -1578,7 +1587,8 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         return
 
     if payload == "confirm_edit":
-        d = user_state.get(chat_id, {})
+        answer_cb(callback_id)
+        d = user_data.get(chat_id, {})
         edit_btns = []
         if d.get("product"):
             edit_btns.append([{"type": "callback", "text": "Товар", "payload": "edit_product"}])
@@ -1595,26 +1605,29 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
 
     # Обработка конкретных edit_*
     if payload.startswith("edit_"):
-        d = user_state.get(chat_id, {})
+        answer_cb(callback_id)
+        d = user_data.get(chat_id, {})
         field = payload.replace("edit_", "")
         if field == "product":
             d.pop("product", None)
             d.pop("price_per_ton", None)
-            d["step"] = "PRODUCT"
+            d.pop("items", None)
         elif field == "volume":
             d.pop("tons", None)
-            d["step"] = "VOLUME"
+            d.pop("volume_text", None)
+            d.pop("items", None)
         elif field == "delivery":
             d.pop("delivery", None)
-            d["step"] = "DELIVERY"
         elif field == "address":
             d.pop("address", None)
-            d["step"] = "ADDRESS"
         elif field == "phone":
             d.pop("phone", None)
             d.pop("contact_name", None)
-            d["step"] = "CONTACTS"
-        advance(chat_id, user_state.get(chat_id, {}))
+            d.pop("contacts_asked", None)
+        user_data[chat_id] = d
+        new_state = advance(chat_id)
+        if new_state >= 0:
+            user_state[chat_id] = new_state
         return
 
     if payload == "confirm_no":
