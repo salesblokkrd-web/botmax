@@ -118,6 +118,34 @@ WHISPER_FIXES = {
     "эйска": "Ейска",
 }
 
+
+# Русские числительные → цифры (для парсинга "две машины", "три тонны" и т.п.)
+WORD_NUMBERS = {
+    "одн": 1, "одна": 1, "одну": 1, "одного": 1, "один": 1,
+    "два": 2, "две": 2, "двух": 2,
+    "три": 3, "трёх": 3, "трех": 3,
+    "четыре": 4, "четырёх": 4, "четырех": 4,
+    "пять": 5, "пяти": 5,
+    "шесть": 6, "шести": 6,
+    "семь": 7, "семи": 7,
+    "восемь": 8, "восьми": 8,
+    "девять": 9, "девяти": 9,
+    "десять": 10, "десяти": 10,
+    "пол": 0.5, "полторы": 1.5, "полтора": 1.5,
+}
+
+def words_to_numbers(text: str) -> str:
+    """Заменяет русские числительные перед единицами на цифры."""
+    import re as _re
+    pattern = r'\b(' + '|'.join(WORD_NUMBERS.keys()) + r')\s+(тонн\w*|тн\b|т\b|куб\w*|м[³3]|машин\w*|рейс\w*)'
+    def _repl(m):
+        word = m.group(1).lower()
+        return str(WORD_NUMBERS.get(word, word)) + " " + m.group(2)
+    result = _re.sub(pattern, _repl, text, flags=_re.IGNORECASE)
+    if result != text:
+        print(f"[WORD2NUM] '{text}' -> '{result}'", flush=True)
+    return result
+
 def fix_whisper_typos(text: str) -> str:
     """Исправляет типичные ошибки Whisper в названиях и числах."""
     # Фракции щебня: Whisper часто склеивает "5-20" в "520", "20-40" в "2040" и т.д.
@@ -157,6 +185,7 @@ def fix_whisper_typos(text: str) -> str:
     result = " ".join(fixed)
     if result != text:
         print(f"[WHISPER_FIX] \'{text}\' -> \'{result}\'", flush=True)
+    result = words_to_numbers(result)
     return result
 
 PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY, CONFIRM = range(7)
@@ -690,13 +719,15 @@ def get_road_distance(origin, destination):
 
 
 def parse_tons(text: str, product: str = None):
-    m = re.search(r"(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|куб\w*|м[³3])", text)
+    m = re.search(r"(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|куб\w*|м[³3]|машин\w*|рейс\w*)", text)
     if m:
         val = float(m.group(1).replace(",", "."))
         unit_str = m.group(2)
         if re.match(r'куб|м[³3]', unit_str):
             density = DENSITY.get(product, DEFAULT_DENSITY)
             return round(val * density, 1)
+        if re.match(r'машин|рейс', unit_str):
+            return round(val * 30)  # 1 машина/рейс ≈ 30 тонн
         return val
     m = re.search(r"(\d+[.,]?\d*)", text)
     return float(m.group(1).replace(",", ".")) if m else None
@@ -853,15 +884,12 @@ def advance(chat_id: int) -> int:
         tons = d.get("tons", 0)
         if tons < 30:
             d.pop("delivery", None)
-            btns = [
-                [{"type": "callback", "text": "Самовывоз", "payload": "Самовывоз"}],
-                [{"type": "callback", "text": "Изменить объём", "payload": "edit_volume"}],
-            ]
+            d.pop("tons", None)
+            d.pop("volume_text", None)
             send_msg(chat_id,
                 f"Доставка возможна от 30 тонн — минимальная загрузка машины.\n\n"
-                f"Вы указали {tons} т. Заберёте самовывозом или напишите новый объём (например: 30 тонн).",
-                btns)
-            return DELIVERY
+                f"Вы указали {tons} т. Укажите новый объём (например: 30 тонн, 2 машины) или напишите «самовывоз».")
+            return VOLUME
         if not d.get("address"):
             send_msg(chat_id, "Куда доставить? Укажите адрес (город, улица, дом) — рассчитаем стоимость.")
             return ADDRESS
