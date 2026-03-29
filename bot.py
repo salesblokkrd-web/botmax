@@ -532,6 +532,13 @@ def parse_order_groq(text: str) -> OrderParsed:
 
 def parse_order(text: str) -> OrderParsed:
     text = fix_whisper_typos(text)
+    # Конвертируем "машины/рейсы" в тонны до отправки в LLM
+    m_machines = re.search(r'(\d+[.,]?\d*)\s*(машин\w*|рейс\w*)', text, re.IGNORECASE)
+    if m_machines:
+        machine_val = float(m_machines.group(1).replace(",", "."))
+        tons_val = round(machine_val * 30)
+        text = text[:m_machines.start()] + f"{tons_val} тонн" + text[m_machines.end():]
+        print(f"[MACHINES] {m_machines.group(0)} -> {tons_val} тонн", flush=True)
     if GROQ_API_KEY:
         try:
             return parse_order_groq(text)
