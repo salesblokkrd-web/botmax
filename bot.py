@@ -1923,7 +1923,7 @@ def main():
     print("[STARTUP] Еженедельный отчёт: воскресенье 20:00 МСК", flush=True)
 
     marker = None
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         while True:
             try:
                 resp = get_updates(marker=marker, timeout=30)
