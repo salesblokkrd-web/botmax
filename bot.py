@@ -208,6 +208,18 @@ pending_voice: dict = {}    # chat_id -> (text, user_name, user_id)
 processed_callbacks: set = set()  # дедупликация нажатий кнопок
 user_chat_map: dict = {}   # user_id -> chat_id (Max: callback не содержит chat_id)
 
+# ─── Опросы (poll) ────────────────────────────────────────────────────────
+# poll_data[poll_id] = {
+#   "question": str,
+#   "options": ["opt1", "opt2", ...],
+#   "votes": {option_index: set(user_id, ...), ...},
+#   "chat_id": int,
+#   "message_id": str,
+# }
+poll_data: dict = {}
+_poll_counter = 0
+_poll_lock = threading.Lock()
+
 REPLY_TIMEOUT = 30 * 60  # 30 минут
 
 # ─── Блокировки для многопоточности ────────────────────────────────────────
@@ -388,6 +400,113 @@ def get_updates(marker=None, timeout: int = 30) -> dict:
 def make_buttons(items: list) -> list:
     """Список строк → список рядов кнопок (одна кнопка в ряд)."""
     return [[{"type": "callback", "text": s, "payload": s}] for s in items]
+
+
+def edit_msg(message_id: str, text: str, buttons=None) -> dict:
+    """Редактировать сообщение по message_id."""
+    body = {"text": text}
+    if buttons:
+        body["attachments"] = [{
+            "type": "inline_keyboard",
+            "payload": {"buttons": buttons}
+        }]
+    return _api("PUT", "messages", params={"message_id": message_id}, body=body)
+
+
+def _format_poll_text(question: str, options: list, votes: dict) -> str:
+    """Форматирует текст опроса с текущими результатами."""
+    total = sum(len(v) for v in votes.values())
+    lines = [question, ""]
+    for i, opt in enumerate(options):
+        count = len(votes.get(i, set()))
+        pct = round(count / total * 100) if total else 0
+        bar_len = round(pct / 5) if total else 0
+        bar = "▓" * bar_len + "░" * (20 - bar_len)
+        lines.append(f"{opt}  —  {count} ({pct}%)")
+        lines.append(f"{bar}")
+        lines.append("")
+    lines.append(f"Всего голосов: {total}")
+    return "\n".join(lines)
+
+
+def send_poll(chat_id: int, question: str, options: list) -> str:
+    """Отправляет опрос с inline-кнопками. Возвращает poll_id.
+
+    Args:
+        chat_id: ID чата для отправки
+        question: текст вопроса
+        options: список вариантов ответа (строки)
+
+    Returns:
+        poll_id (str) для отслеживания, или "" при ошибке
+    """
+    global _poll_counter
+    with _poll_lock:
+        _poll_counter += 1
+        poll_id = f"poll_{int(time.time())}_{_poll_counter}"
+
+    votes = {i: set() for i in range(len(options))}
+    text = _format_poll_text(question, options, votes)
+
+    buttons = []
+    for i, opt in enumerate(options):
+        buttons.append([{"type": "callback", "text": opt, "payload": f"pollvote_{poll_id}_{i}"}])
+
+    result = send_msg(chat_id, text, buttons)
+    message_id = result.get("message", {}).get("body", {}).get("mid", "")
+
+    if not message_id:
+        print(f"[POLL] Не удалось получить message_id: {result}", flush=True)
+        return ""
+
+    poll_data[poll_id] = {
+        "question": question,
+        "options": options,
+        "votes": votes,
+        "chat_id": chat_id,
+        "message_id": message_id,
+    }
+    print(f"[POLL] Создан {poll_id}: {question} ({len(options)} вариантов)", flush=True)
+    return poll_id
+
+
+def handle_poll_vote(user_id: int, callback_id: str, payload: str):
+    """Обработка голоса в опросе. Multiple choice: toggle vote."""
+    parts = payload.split("_")
+    # payload = pollvote_poll_<ts>_<counter>_<option_index>
+    if len(parts) < 5:
+        answer_cb(callback_id, "Ошибка опроса")
+        return
+    option_idx = int(parts[-1])
+    poll_id = "_".join(parts[1:-1])  # poll_<ts>_<counter>
+
+    poll = poll_data.get(poll_id)
+    if not poll:
+        answer_cb(callback_id, "Опрос завершён")
+        return
+
+    votes = poll["votes"]
+    if option_idx not in votes:
+        answer_cb(callback_id, "Ошибка")
+        return
+
+    opt_name = poll["options"][option_idx]
+
+    # Toggle: если уже голосовал за этот вариант — снимаем голос
+    if user_id in votes[option_idx]:
+        votes[option_idx].discard(user_id)
+        answer_cb(callback_id, f'Голос за "{opt_name}" снят')
+    else:
+        votes[option_idx].add(user_id)
+        answer_cb(callback_id, f'Вы проголосовали за "{opt_name}"')
+
+    # Обновляем сообщение с результатами
+    text = _format_poll_text(poll["question"], poll["options"], votes)
+    buttons = []
+    for i, opt in enumerate(poll["options"]):
+        buttons.append([{"type": "callback", "text": opt, "payload": f"pollvote_{poll_id}_{i}"}])
+
+    edit_msg(poll["message_id"], text, buttons)
 
 
 # ─── Pydantic модели ───────────────────────────────────────────────────────
@@ -1694,6 +1813,11 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
         user_data.pop(chat_id, None)
         save_state()
         send_msg(chat_id, "Хорошо, начнём заново. Напишите что вам нужно или /start")
+        return
+
+    # Голоса в опросах
+    if payload.startswith("pollvote_"):
+        handle_poll_vote(user_id, callback_id, payload)
         return
 
     answer_cb(callback_id)
