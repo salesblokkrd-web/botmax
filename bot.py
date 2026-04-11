@@ -207,6 +207,12 @@ order_summaries: dict = {}  # client_id -> краткий саммари зая�
 pending_voice: dict = {}    # chat_id -> (text, user_name, user_id)
 processed_callbacks: set = set()  # дедупликация нажатий кнопок
 user_chat_map: dict = {}   # user_id -> chat_id (Max: callback не содержит chat_id)
+poll_wizard_data: dict = {}  # chat_id -> {"question": str, "options": list}
+
+# Poll wizard states
+POLL_WIZ_QUESTION = "poll_wiz_question"
+POLL_WIZ_OPTIONS = "poll_wiz_options"
+POLL_WIZ_TARGET = "poll_wiz_target"
 
 # ─── Опросы (poll) ────────────────────────────────────────────────────────
 # poll_data[poll_id] = {
@@ -1484,6 +1490,57 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         print(f"[OWNERID] Владелец сохранён: {user_name} -> {chat_id}")
         return
 
+    # /newpoll — визард создания опроса (только владелец)
+    if text.strip() in ("/newpoll", "/опрос"):
+        is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
+        if not is_owner:
+            send_msg(chat_id, "Команда доступна только владельцу.")
+            return
+        poll_wizard_data[chat_id] = {"question": None, "options": []}
+        user_state[chat_id] = POLL_WIZ_QUESTION
+        send_msg(chat_id, "Напиши вопрос для опроса:")
+        return
+
+    # Poll wizard: обработка шагов
+    wiz_state = user_state.get(chat_id)
+    if wiz_state in (POLL_WIZ_QUESTION, POLL_WIZ_OPTIONS, POLL_WIZ_TARGET):
+        is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
+        if not is_owner:
+            user_state.pop(chat_id, None)
+            poll_wizard_data.pop(chat_id, None)
+        else:
+            if wiz_state == POLL_WIZ_QUESTION:
+                poll_wizard_data[chat_id]["question"] = text.strip()
+                user_state[chat_id] = POLL_WIZ_OPTIONS
+                send_msg(chat_id, "Варианты ответа — каждый с новой строки.\nНапример:\nДа\nНет\nХочу посмотреть")
+                return
+            elif wiz_state == POLL_WIZ_OPTIONS:
+                lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+                if len(lines) < 2:
+                    # Может быть через | 
+                    lines = [l.strip() for l in text.strip().split("|") if l.strip()]
+                if len(lines) < 2:
+                    send_msg(chat_id, "Нужно минимум 2 варианта. Каждый с новой строки или через |")
+                    return
+                poll_wizard_data[chat_id]["options"] = lines
+                q = poll_wizard_data[chat_id]["question"]
+                opts_text = "\n".join(f"  {i+1}. {o}" for i, o in enumerate(lines))
+                preview = f"Опрос:\n\n{q}\n\n{opts_text}\n\nОтправить в канал?"
+                btns = [
+                    [{"type": "callback", "text": "Отправить в канал", "payload": "/pollwiz_channel"}],
+                    [{"type": "callback", "text": "Отправить мне (тест)", "payload": "/pollwiz_me"}],
+                    [{"type": "callback", "text": "Отмена", "payload": "/pollwiz_cancel"}],
+                ]
+                send_msg(chat_id, preview, btns)
+                user_state[chat_id] = POLL_WIZ_TARGET
+                return
+            elif wiz_state == POLL_WIZ_TARGET:
+                # Текстовый ответ вместо кнопки — отменяем
+                user_state.pop(chat_id, None)
+                poll_wizard_data.pop(chat_id, None)
+                send_msg(chat_id, "Визард опроса отменён. Нажми кнопку или /newpoll заново.")
+                return
+
     # /poll <chat_id> <question> | opt1 | opt2 | ... — создать опрос (только владелец)
     if text.strip().startswith("/poll "):
         is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
@@ -1778,9 +1835,35 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str, 
         return
 
     # Кнопки меню
-    if payload in ("/start", "/cancel", "/заявки", "/stats", "/menu"):
+    if payload in ("/start", "/cancel", "/заявки", "/stats", "/menu", "/newpoll"):
         answer_cb(callback_id)
         handle_message(chat_id, payload, "", user_id=user_id)
+        return
+
+    # Poll wizard callbacks
+    if payload.startswith("/pollwiz_"):
+        answer_cb(callback_id)
+        wiz = poll_wizard_data.get(chat_id) or poll_wizard_data.get(user_id)
+        src_id = chat_id or user_id
+        if not wiz:
+            send_msg(src_id, "Визард опроса истёк. /newpoll — начать заново.")
+            return
+        if payload == "/pollwiz_cancel":
+            user_state.pop(src_id, None)
+            poll_wizard_data.pop(src_id, None)
+            send_msg(src_id, "Опрос отменён.")
+            return
+        target_chat = src_id if payload == "/pollwiz_me" else -72678007708240
+        q = wiz["question"]
+        opts = wiz["options"]
+        pid = send_poll(target_chat, q, opts)
+        user_state.pop(src_id, None)
+        poll_wizard_data.pop(src_id, None)
+        if pid:
+            where = "тебе (тест)" if payload == "/pollwiz_me" else "в канал"
+            send_msg(src_id, f"Опрос отправлен {where}! ID: {pid}")
+        else:
+            send_msg(src_id, "Ошибка при создании опроса. Попробуй /newpoll заново.")
         return
 
     if payload == "voice_retry":
