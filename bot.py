@@ -2145,15 +2145,6 @@ def main():
     load_state()
     _load_polls()
 
-    # Если нет активных опросов — создать тестовый для проверки
-    if not poll_data and OWNER_CHAT_ID:
-        print("[STARTUP] Нет опросов — создаю тестовый для владельца", flush=True)
-        test_pid = send_poll(OWNER_CHAT_ID, "Тест кнопок (автоматический)", ["Работает!", "Не работает"])
-        if test_pid:
-            print(f"[STARTUP] Тестовый опрос создан: {test_pid}", flush=True)
-        else:
-            print("[STARTUP] Ошибка создания тестового опроса", flush=True)
-
     # Запускаем фоновый тред для еженедельного отчёта
     report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
     report_thread.start()
