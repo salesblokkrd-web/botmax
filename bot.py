@@ -216,9 +216,48 @@ user_chat_map: dict = {}   # user_id -> chat_id (Max: callback не содерж
 #   "chat_id": int,
 #   "message_id": str,
 # }
+POLLS_FILE = "polls.json"
 poll_data: dict = {}
 _poll_counter = 0
 _poll_lock = threading.Lock()
+
+def _save_polls():
+    """Сохранить poll_data в файл (votes: set → list для JSON)."""
+    try:
+        serializable = {}
+        for pid, p in poll_data.items():
+            serializable[pid] = {
+                "question": p["question"],
+                "options": p["options"],
+                "votes": {str(k): list(v) for k, v in p["votes"].items()},
+                "chat_id": p.get("chat_id"),
+                "message_id": p.get("message_id", ""),
+            }
+        with open(POLLS_FILE, "w") as f:
+            json.dump(serializable, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[POLL] Ошибка сохранения: {e}", flush=True)
+
+def _load_polls():
+    """Загрузить poll_data из файла."""
+    global poll_data, _poll_counter
+    try:
+        with open(POLLS_FILE) as f:
+            raw = json.load(f)
+        for pid, p in raw.items():
+            poll_data[pid] = {
+                "question": p["question"],
+                "options": p["options"],
+                "votes": {int(k): set(v) for k, v in p["votes"].items()},
+                "chat_id": p.get("chat_id"),
+                "message_id": p.get("message_id", ""),
+            }
+        _poll_counter = len(poll_data)
+        print(f"[POLL] Загружено {len(poll_data)} опросов из {POLLS_FILE}", flush=True)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[POLL] Ошибка загрузки: {e}", flush=True)
 
 REPLY_TIMEOUT = 30 * 60  # 30 минут
 
@@ -467,6 +506,7 @@ def send_poll(chat_id: int, question: str, options: list) -> str:
         "message_id": message_id,
     }
     print(f"[POLL] Создан {poll_id}: {question} ({len(options)} вариантов)", flush=True)
+    _save_polls()
     return poll_id
 
 
@@ -536,6 +576,7 @@ def handle_poll_vote(user_id: int, callback_id: str, payload: str, orig_msg: dic
         buttons.append([{"type": "callback", "text": opt, "payload": f"pollvote_{poll_id}_{i}"}])
 
     edit_msg(poll["message_id"], text, buttons)
+    _save_polls()
 
 
 # ─── Pydantic модели ───────────────────────────────────────────────────────
@@ -2095,6 +2136,7 @@ def main():
     print(f"[STARTUP] MANAGER_CHAT_ID = {MANAGER_CHAT_ID or 'НЕ ЗАДАН — заявки некуда слать!'}", flush=True)
     print(f"[STARTUP] OWNER_CHAT_ID   = {OWNER_CHAT_ID or 'не задан'}", flush=True)
     load_state()
+    _load_polls()
 
     # Запускаем фоновый тред для еженедельного отчёта
     report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
