@@ -51,8 +51,8 @@ PRODUCTS = {
     "Песок мелкозернистый":  233,
     "Песок крупнозернистый": 566,
     "Гравий":                240,
-    "ГПС плохой":            75,
-    "ГПС хороший":           160,
+    "ГПС эконом":            75,
+    "ГПС премиум":           160,
 }
 
 DENSITY = {
@@ -63,15 +63,107 @@ DENSITY = {
     "Песок мелкозернистый":  1.50,
     "Песок крупнозернистый": 1.50,
     "Гравий":                1.45,
-    "ГПС плохой":            1.77,
-    "ГПС хороший":           1.77,
+    "ГПС эконом":            1.77,
+    "ГПС премиум":           1.77,
 }
 DEFAULT_DENSITY = 1.5
+
+# Склонение названий товаров (родительный падеж)
+PRODUCT_GENITIVE = {
+    "Отсев 0-5": "отсева 0-5",
+    "Щебень 5-20": "щебня 5-20",
+    "Щебень 20-40": "щебня 20-40",
+    "Щебень 40-70": "щебня 40-70",
+    "Песок мелкозернистый": "песка мелкозернистого",
+    "Песок крупнозернистый": "песка крупнозернистого",
+    "Гравий": "гравия",
+    "ГПС эконом": "ГПС эконом",
+    "ГПС премиум": "ГПС премиум",
+}
+
+def product_genitive(name):
+    """Возвращает название товара в родительном падеже."""
+    return PRODUCT_GENITIVE.get(name, name)
+
+
+
+# Исправления ошибок распознавания Whisper для местных топонимов
+WHISPER_FIXES = {
+    "лобинск": "Лабинск",
+    "лобинске": "Лабинске",
+    "лобинска": "Лабинска",
+    "белоречинск": "Белореченск",
+    "белоречинске": "Белореченске",
+    "кропоткин": "Кропоткин",
+    "майком": "Майкоп",
+    "майкоб": "Майкоп",
+    "армовир": "Армавир",
+    "армовире": "Армавире",
+    "курганинск": "Курганинск",
+    "тихарецк": "Тихорецк",
+    "тихарецке": "Тихорецке",
+    "гулькевичи": "Гулькевичи",
+    "усть-лобинск": "Усть-Лабинск",
+    "усть-лобинске": "Усть-Лабинске",
+    "апшеронск": "Апшеронск",
+    "мостовский": "Мостовской",
+    "мостовском": "Мостовском",
+    "веселовская": "Весёловская",
+    "веселовской": "Весёловской",
+    "веселовка": "Весёловка",
+    "веселовке": "Весёловке",
+    "веселовку": "Весёловку",
+    "эйск": "Ейск",
+    "эйске": "Ейске",
+    "эйска": "Ейска",
+}
+
+def fix_whisper_typos(text: str) -> str:
+    """Исправляет типичные ошибки Whisper в названиях и числах."""
+    # Фракции щебня: Whisper часто склеивает "5-20" в "520", "20-40" в "2040" и т.д.
+    # "520 тысяч кубов" → "5-20, 1000 кубов" (щебень пять-двадцать, тысяча кубов)
+    # "520 тысячу кубов" → "5-20, 1000 кубов"
+    # Но "520 тонн" → оставляем как есть (520 тонн — реальный объём)
+    text = re.sub(r'\b520\s+(тысяч[аиу]?|тыщ[аиу]?)\s+(куб\w*|м[³3])', r'5-20, 1000 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b2040\s+(тысяч[аиу]?|тыщ[аиу]?)\s+(куб\w*|м[³3])', r'20-40, 1000 \2', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b4070\s+(тысяч[аиу]?|тыщ[аиу]?)\s+(куб\w*|м[³3])', r'40-70, 1000 \2', text, flags=re.IGNORECASE)
+    # "520 кубов" без "тысяч" — тоже скорее всего фракция 5-20 + объём слипся
+    # Но тут нужно быть осторожнее: "520 кубов" может быть реальным объёмом
+    # Оставляем только вариант с "тысяч"
+
+    # "щебень 520" → "щебень 5-20" (без объёма рядом)
+    text = re.sub(r'(щебень\w*)\s+520\b(?!\s*(?:тонн|т\b|куб|м[³3]|тысяч|руб))', r'\1 5-20', text, flags=re.IGNORECASE)
+    text = re.sub(r'(щебень\w*)\s+2040\b(?!\s*(?:тонн|т\b|куб|м[³3]|тысяч|руб))', r'\1 20-40', text, flags=re.IGNORECASE)
+    text = re.sub(r'(щебень\w*)\s+4070\b(?!\s*(?:тонн|т\b|куб|м[³3]|тысяч|руб))', r'\1 40-70', text, flags=re.IGNORECASE)
+
+    words = text.split()
+    fixed = []
+    for w in words:
+        low = w.lower().strip(".,!?;:")
+        if low in WHISPER_FIXES:
+            prefix = ""
+            suffix = ""
+            for ch in w:
+                if ch.isalpha() or ch == "-":
+                    break
+                prefix += ch
+            for ch in reversed(w):
+                if ch.isalpha() or ch == "-":
+                    break
+                suffix = ch + suffix
+            fixed.append(prefix + WHISPER_FIXES[low] + suffix)
+        else:
+            fixed.append(w)
+    result = " ".join(fixed)
+    if result != text:
+        print(f"[WHISPER_FIX] \'{text}\' -> \'{result}\'", flush=True)
+    return result
 
 PRODUCT, VOLUME, DELIVERY, ADDRESS, CONTACTS, PHONE_ONLY, CONFIRM = range(7)
 
 # State machine (вместо ConversationHandler из PTB)
-user_state: dict = {}   # chat_id -> int (состояние)
+user_state: dict = {}
+saved_contacts: dict = {}  # chat_id -> {"contact_name": ..., "phone": ..., "address": ...}   # chat_id -> int (состояние)
 user_data: dict = {}    # chat_id -> dict (данные заявки)
 pending_replies: dict = {}  # manager_id -> {"client_id": int, "expires": float, "summary": str}
 order_summaries: dict = {}  # client_id -> краткий саммари заявки для менеджера
@@ -83,6 +175,7 @@ REPLY_TIMEOUT = 30 * 60  # 30 минут
 
 # ─── Блокировки для многопоточности ────────────────────────────────────────
 _save_lock = threading.Lock()          # защита записи bot_state.json
+_voice_lock = threading.Lock()         # защита pending_voice
 _user_locks: dict = {}                 # chat_id -> Lock (один поток на пользователя)
 _user_locks_guard = threading.Lock()   # защита самого словаря _user_locks
 
@@ -265,6 +358,8 @@ def make_buttons(items: list) -> list:
 class OrderItem(BaseModel):
     product: Optional[str] = None
     tons: Optional[float] = None
+    raw_value: Optional[float] = None
+    unit: Optional[str] = None  # 'тонн' или 'куб'
 
 class OrderParsed(BaseModel):
     items: Optional[List[OrderItem]] = None
@@ -297,13 +392,13 @@ def parse_order_regex(text: str) -> OrderParsed:
             (r'щебень.*?40-70|40-70.*?щебень|\b40-70\b', "Щебень 40-70"),
             (r'\bотсев\b', "Отсев 0-5"),
             (r'гравий', "Гравий"),
-            (r'гпс.*?плох|плох.*?гпс', "ГПС плохой"),
-            (r'гпс.*?хор|хор.*?гпс', "ГПС хороший"),
-            (r'\bгпс\b', "ГПС хороший"),
+            (r'гпс.*?плох|плох.*?гпс', "ГПС эконом"),
+            (r'гпс.*?хор|хор.*?гпс', "ГПС премиум"),
+            (r'\bгпс\b', "ГПС премиум"),
             (r'песок.*?мелк|мелк.*?песок', "Песок мелкозернистый"),
             (r'песок.*?круп|круп.*?песок', "Песок крупнозернистый"),
             (r'\bпесок\b', "Песок мелкозернистый"),
-            (r'\bщебень\b', "Щебень 5-20"),
+            (r'\bщебень\b', None)  # не подставляем фракцию — спросим у клиента,
         ]
         for pat, name in patterns:
             if re.search(pat, t_norm):
@@ -353,15 +448,12 @@ def parse_order_groq(text: str) -> OrderParsed:
                 "ВАЖНО: фракция щебня — два числа через дефис (5-20, 20-40, 40-70). "
                 "Если клиент пишет '7 5-20' — это 7 тонн щебня 5-20. "
                 "КРИТИЧНО: 520, 2040, 4070 — это НЕ тоннаж, это фракции слитно.\n"
-                "КУБЫ → ТОННЫ: если клиент указал кубометры/кубов/куб/м³ — переведи в тонны по насыпной плотности: "
-                "Отсев 0-5=1.27, Щебень 5-20=1.45, Щебень 20-40=1.42, Щебень 40-70=1.44, "
-                "Песок мелкозернистый=1.50, Песок крупнозернистый=1.50, Гравий=1.45, ГПС=1.77. "
-                "Если продукт неизвестен — умножай на 1.5. В tons всегда возвращай тонны.\n\n"
+                "НЕ конвертируй кубы в тонны! Верни число КАК ЕСТЬ и укажи единицу.\n\n"
                 "Верни JSON:\n"
-                "- items: [{\"product\": точное название или null, \"tons\": число или null}]\n"
+                "- items: [{\"product\": точное название или null, \"value\": число или null, \"unit\": \"тонн\" или \"куб\"}]\n"
                 "- delivery: «Доставка» или «Самовывоз» или null\n"
                 "- address: адрес или null\n"
-                "Пример: {\"items\": [{\"product\": \"Щебень 5-20\", \"tons\": 7}], \"delivery\": \"Доставка\", \"address\": \"Краснодар\"}"
+                "Пример: {\"items\": [{\"product\": \"Щебень 5-20\", \"value\": 7, \"unit\": \"тонн\"}], \"delivery\": \"Доставка\", \"address\": \"Краснодар\"}"
             )},
         ],
         temperature=0,
@@ -371,23 +463,43 @@ def parse_order_groq(text: str) -> OrderParsed:
     raw = re.sub(r"```[a-z]*\n?", "", raw).strip("` \n")
     data = json.loads(raw)
     FRACTION_ARTIFACTS = {520, 2040, 4070, 520.0, 2040.0, 4070.0}
+    # Определяем единицу из исходного текста (fallback если LLM не вернула unit)
+    text_lower = text.lower()
+    text_has_cubes = bool(re.search(r'куб|м[³3]|кубометр|кубов', text_lower))
+    text_has_volume = bool(re.search(r'тысяч|тонн|куб|м[³3]', text_lower))
+    print(f"[GROQ] raw JSON: {raw}", flush=True)
     items = []
     for it in (data.get("items") or []):
-        t = float(it["tons"]) if it.get("tons") else None
-        if t in FRACTION_ARTIFACTS:
-            t = None
-        items.append(OrderItem(product=it.get("product"), tons=t))
+        raw_val = float(it["value"]) if it.get("value") else (float(it["tons"]) if it.get("tons") else None)
+        unit = it.get("unit")
+        # Fallback: если LLM не вернула unit — определяем из текста
+        if not unit:
+            unit = "куб" if text_has_cubes else "тонн"
+        # 520/2040/4070 — артефакты ТОЛЬКО если в тексте нет явного объёма (тысяч, тонн, кубов)
+        if raw_val and raw_val in FRACTION_ARTIFACTS and not text_has_volume:
+            raw_val = None
+        # Конвертация кубов в тонны — в Python, не в LLM
+        product = it.get("product")
+        if raw_val and unit and re.match(r"куб", unit):
+            density = DENSITY.get(product, DEFAULT_DENSITY)
+            tons = round(raw_val * density, 1)
+            print(f"[PARSE] {raw_val} куб × {density} = {tons} т ({product})", flush=True)
+        else:
+            tons = raw_val
+        items.append(OrderItem(product=product, tons=tons, raw_value=raw_val, unit=unit))
     first = items[0] if items else OrderItem()
     return OrderParsed(
         items=items if items else None,
         product=first.product,
         tons=first.tons,
+        unit=first.unit,
         delivery=data.get("delivery"),
         address=data.get("address"),
     )
 
 
 def parse_order(text: str) -> OrderParsed:
+    text = fix_whisper_typos(text)
     if GROQ_API_KEY:
         try:
             return parse_order_groq(text)
@@ -416,33 +528,124 @@ def parse_contacts_groq(text: str) -> ContactsParsed:
     return ContactsParsed(name=data.get("name"), company=data.get("company"), phone=data.get("phone"))
 
 
-# ─── Геокодирование и маршрутизация (идентично tg-bot) ───────────────────
+# ─── Геокодирование и маршрутизация ───────────────────────────────────────
+
+# Зона обслуживания: bounding box регионов (lat_min, lat_max, lon_min, lon_max)
+# Координаты местных населённых пунктов (2700+ из GeoNames — КК + Адыгея)
+def _load_local_coords():
+    try:
+        with open(os.path.join(os.path.dirname(__file__) or ".", "local_coords.json"), encoding="utf-8") as f:
+            raw = json.load(f)
+        coords = {k: tuple(v) for k, v in raw.items()}
+        # Гарантируем наличие ключевых точек
+        coords.setdefault("архиповское", (44.9928, 39.8387))
+        print(f"[GEOCODE] Загружено {len(coords)} населённых пунктов из local_coords.json", flush=True)
+        return coords
+    except Exception as e:
+        print(f"[GEOCODE] Ошибка загрузки local_coords.json: {e}, используем минимальный словарь", flush=True)
+        return {
+            "архиповское": (44.9928, 39.8387),
+            "белореченск": (44.7667, 39.8833),
+            "краснодар": (45.0453, 38.9818),
+            "сочи": (43.597, 39.7248),
+        }
+
+LOCAL_COORDS = _load_local_coords()
+
+def _lookup_local(address: str):
+    """Ищет адрес в словаре известных координат."""
+    addr_lower = address.lower()
+    for name, coords in LOCAL_COORDS.items():
+        if name in addr_lower:
+            print(f"[GEOCODE] LOCAL: '{name}' найдено в '{address}' -> {coords}", flush=True)
+            return coords
+    return None
+
+SERVICE_REGIONS = [
+    ("Краснодарский край",   43.40, 46.30, 36.60, 41.75),
+    ("Республика Адыгея",    43.75, 45.25, 38.80, 40.50),
+    ("Ростовская область",   45.85, 50.25, 38.10, 44.30),
+    ("Ставропольский край",  43.65, 46.25, 40.80, 45.35),
+]
+
+def _in_service_area(lat, lon):
+    """Проверяет, попадают ли координаты в зону обслуживания."""
+    for name, lat_min, lat_max, lon_min, lon_max in SERVICE_REGIONS:
+        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+            return name
+    return None
 
 def get_coords(address: str):
+    """Геокодирование с приоритетом: локальный словарь → КК → Адыгея → Ростов → Ставрополье."""
+    address = fix_whisper_typos(address)
+    # Сначала ищем в локальном словаре (быстро и точно)
+    local = _lookup_local(address)
+    if local:
+        return local
     try:
         from geopy.geocoders import Nominatim
         geolocator = Nominatim(user_agent="quarry_delivery_bot_krd", timeout=5)
         parts = [p.strip() for p in address.split(",") if p.strip()]
         city_candidate = parts[0] if parts else address
-        city_only = city_candidate.split()[0] if city_candidate.split() else city_candidate
 
-        def in_russia(loc):
-            return 40.0 <= loc.latitude <= 80.0 and 25.0 <= loc.longitude <= 180.0
+        # Нормализация: "станица X" -> доп. вариант "ст. X" и просто "X"
+        addr_variants = [address]
+        city_variants = [city_candidate]
+        for prefix in ["станица ", "станицa ", "ст. ", "ст ", "хутор ", "посёлок ", "поселок ", "село ", "пос. ", "пос "]:
+            for src in [address.lower(), city_candidate.lower()]:
+                if src.startswith(prefix):
+                    short = src[len(prefix):].strip().capitalize()
+                    if short not in addr_variants:
+                        addr_variants.append(short)
+                    if short not in city_variants:
+                        city_variants.append(short)
 
-        queries = [
-            f"{address}, Краснодарский край, Россия",
-            f"{city_candidate}, Краснодарский край, Россия",
-            f"{city_only}, Россия",
-        ]
-        for query in queries:
+        # Группы запросов по приоритету: КК → Адыгея → Ростов → Ставрополье
+        # Внутри КК: сначала с районами (точнее), потом без
+        kk_queries = []
+        for av in addr_variants:
+            kk_queries.append(f"{av}, Краснодарский край, Россия")
+        for cv in city_variants:
+            q = f"{cv}, Краснодарский край, Россия"
+            if q not in kk_queries:
+                kk_queries.append(q)
+
+        other_queries = []
+        for av in addr_variants:
+            other_queries.append(f"{av}, Республика Адыгея, Россия")
+        for av in addr_variants:
+            other_queries.append(f"{av}, Ростовская область, Россия")
+        for av in addr_variants:
+            other_queries.append(f"{av}, Ставропольский край, Россия")
+
+        # Сначала ищем ТОЛЬКО в КК
+        for query in kk_queries:
             try:
                 loc = geolocator.geocode(query)
-                if loc and in_russia(loc):
-                    print(f"[GEOCODE] OK: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})", flush=True)
-                    return (loc.latitude, loc.longitude)
+                if loc:
+                    region = _in_service_area(loc.latitude, loc.longitude)
+                    if region:
+                        print(f"[GEOCODE] OK (КК): {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f}) [{region}]", flush=True)
+                        return (loc.latitude, loc.longitude)
+                    else:
+                        print(f"[GEOCODE] вне зоны: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})", flush=True)
             except Exception as e:
                 print(f"[GEOCODE] ошибка: {e}", flush=True)
-        print(f"[GEOCODE] не найдено: {address!r}", flush=True)
+
+        # Если в КК не нашли — ищем в соседних регионах
+        for query in other_queries:
+            try:
+                loc = geolocator.geocode(query)
+                if loc:
+                    region = _in_service_area(loc.latitude, loc.longitude)
+                    if region:
+                        print(f"[GEOCODE] OK (сосед): {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f}) [{region}]", flush=True)
+                        return (loc.latitude, loc.longitude)
+                    else:
+                        print(f"[GEOCODE] вне зоны: {query!r} -> ({loc.latitude:.4f}, {loc.longitude:.4f})", flush=True)
+            except Exception as e:
+                print(f"[GEOCODE] ошибка: {e}", flush=True)
+        print(f"[GEOCODE] не найдено в зоне обслуживания: {address!r}", flush=True)
     except Exception as e:
         print(f"[GEOCODE] критическая ошибка: {e}", flush=True)
     return None
@@ -558,7 +761,11 @@ def try_parse_freeform(text: str, chat_id: int) -> bool:
                 found = True
             if not d.get("tons"):
                 d["tons"] = it["tons"]
-                d["volume_text"] = f"{it['tons']} т"
+                raw_item = parsed.items[0] if parsed.items else None
+                if raw_item and raw_item.unit and re.match(r"куб", raw_item.unit) and raw_item.raw_value:
+                    d["volume_text"] = f"{raw_item.raw_value:.0f} м³ = {it['tons']} т"
+                else:
+                    d["volume_text"] = f"{it['tons']} т"
                 found = True
     elif parsed.product and parsed.product in PRODUCTS and not d.get("product"):
         d["product"] = parsed.product
@@ -566,7 +773,10 @@ def try_parse_freeform(text: str, chat_id: int) -> bool:
         found = True
     if parsed.tons and parsed.tons > 0 and not d.get("tons"):
         d["tons"] = parsed.tons
-        d["volume_text"] = f"{parsed.tons} т"
+        if parsed.unit and re.match(r"куб", parsed.unit) and parsed.items and parsed.items[0].raw_value:
+            d["volume_text"] = f"{parsed.items[0].raw_value:.0f} м³ = {parsed.tons} т"
+        else:
+            d["volume_text"] = f"{parsed.tons} т"
         found = True
     if parsed.delivery and not d.get("delivery"):
         d["delivery"] = parsed.delivery
@@ -611,6 +821,8 @@ def build_confirm_summary(d: dict) -> str:
     return "\n".join(lines)
 
 
+FUNNEL_NAMES = {PRODUCT: "product", VOLUME: "volume", DELIVERY: "delivery", ADDRESS: "address", CONTACTS: "contacts", PHONE_ONLY: "phone", CONFIRM: "confirm"}
+
 def advance(chat_id: int) -> int:
     """Определяет следующий шаг диалога. Возвращает состояние или -1 (конец)."""
     d = user_data.get(chat_id, {})
@@ -621,7 +833,7 @@ def advance(chat_id: int) -> int:
         return PRODUCT
 
     if not d.get("tons"):
-        send_msg(chat_id, f"Сколько тонн {d['product']} вам нужно?\n\nНапример: 30 тонн")
+        send_msg(chat_id, f"Сколько тонн {product_genitive(d['product'])} вам нужно?\n\nНапример: 30 тонн")
         return VOLUME
 
     if not d.get("delivery"):
@@ -667,9 +879,11 @@ def advance(chat_id: int) -> int:
     summary = build_confirm_summary(user_data.get(chat_id, {}))
     btns = [[
         {"type": "callback", "text": "✅ Отправить заявку", "payload": "confirm_yes"},
+        {"type": "callback", "text": "✏️ Изменить", "payload": "confirm_edit"},
         {"type": "callback", "text": "❌ Начать заново", "payload": "confirm_no"},
     ]]
     send_msg(chat_id, f"Проверьте заявку:\n\n{summary}\n\nВсё верно?", btns)
+    track_event("funnel_step", chat_id=chat_id, step="confirm")
     return CONFIRM
 
 
@@ -775,7 +989,8 @@ def finalize(chat_id: int):
         f"Рабочие часы: {WORK_HOURS}",
         "",
         "Благодарим, что выбрали Архиповский карьер!",
-        "Для новой заявки напишите /start",
+        "Для новой заявки нажмите кнопку ниже",
+            [[{"type": "callback", "text": "📋 Новая заявка", "payload": "/start"}]],
     ]
     send_msg(chat_id, "\n".join(lines))
     if map_url:
@@ -870,13 +1085,29 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         expires = entry.get("expires", 0) if isinstance(entry, dict) else 0
         summary = entry.get("summary", "") if isinstance(entry, dict) else ""
         if expires and time.time() > expires:
+            # Таймаут, но всё равно отправляем — не теряем сообщение менеджера
+            try:
+                send_msg(client_id, f"Ответ менеджера:\n\n{text}")
+                send_msg(chat_id, f"✅ Ответ отправлен клиенту (сессия истекла, но сообщение доставлено).")
+                track_event("manager_replied", manager_id=user_id, client_id=client_id, response_mins=None)
+            except Exception as e:
+                send_msg(chat_id, f"Не удалось отправить: {e}")
             save_state()
-            send_msg(chat_id, f"⏱ Время ожидания истекло (30 мин). Нажмите кнопку «Ответить клиенту» снова.")
             return
         try:
             send_msg(client_id, f"Ответ менеджера:\n\n{text}")
             send_msg(chat_id, f"✅ Ответ отправлен клиенту.")
-            track_event("manager_replied", manager_id=user_id, client_id=client_id)
+            # Считаем время ответа менеджера
+            response_mins = None
+            try:
+                events = load_analytics(days=1)
+                order_events = [e for e in events if e.get("event") == "order_completed" and e.get("chat_id") == client_id]
+                if order_events:
+                    order_ts = max(e["ts"] for e in order_events)
+                    response_mins = round((time.time() - order_ts) / 60, 1)
+            except Exception:
+                pass
+            track_event("manager_replied", manager_id=user_id, client_id=client_id, response_mins=response_mins)
         except Exception as e:
             send_msg(chat_id, f"Не удалось отправить: {e}")
         save_state()
@@ -915,6 +1146,36 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         delivery_count  = deliveries.count("Доставка")
         pickup_count    = deliveries.count("Самовывоз")
 
+        # Среднее время ответа менеджера
+        reply_events = [e for e in events_7d if e.get("event") == "manager_replied" and e.get("response_mins")]
+        if reply_events:
+            avg_resp = round(sum(e["response_mins"] for e in reply_events) / len(reply_events), 1)
+            max_resp = round(max(e["response_mins"] for e in reply_events), 1)
+            resp_str = f"  Среднее время ответа: {avg_resp} мин\n  Макс. время ответа: {max_resp} мин"
+        else:
+            resp_str = "  Время ответа: нет данных"
+
+        # Воронка за 7 дней
+        funnel_events = [e for e in events_7d if e.get("event") == "funnel_step"]
+        funnel_steps = {"product": 0, "volume": 0, "delivery": 0, "address": 0, "contacts": 0, "phone": 0, "confirm": 0}
+        seen_chats = {step: set() for step in funnel_steps}
+        for e in funnel_events:
+            step = e.get("step")
+            cid = e.get("chat_id")
+            if step in funnel_steps and cid:
+                seen_chats[step].add(cid)
+        for step in funnel_steps:
+            funnel_steps[step] = len(seen_chats[step])
+        funnel_str = (
+            f"  Товар: {funnel_steps['product']}\n"
+            f"  Объём: {funnel_steps['volume']}\n"
+            f"  Доставка: {funnel_steps['delivery']}\n"
+            f"  Адрес: {funnel_steps['address']}\n"
+            f"  Контакты: {funnel_steps['contacts'] + funnel_steps['phone']}\n"
+            f"  Подтверждение: {funnel_steps['confirm']}\n"
+            f"  Оформлено: {completed_7d}"
+        )
+
         msg = (
             f"Статистика бота (Max)\n\n"
             f"Сегодня:\n"
@@ -928,6 +1189,8 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
             f"  Конверсия: {conv_7d}\n"
             f"  Ответов менеджера: {replied_7d}\n"
             f"  Доставка: {delivery_count} | Самовывоз: {pickup_count}\n\n"
+            f"Менеджер (7 дней):\n{resp_str}\n\n"
+            f"Воронка (7 дней):\n{funnel_str}\n\n"
             f"Топ товаров (7 дней):\n{top_str}"
         )
         send_msg(chat_id, msg)
@@ -972,6 +1235,36 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         OWNER_CHAT_ID = chat_id
         send_msg(chat_id, f"Ваш Max ID: {chat_id}\nВы сохранены как владелец — будете получать копии всех заявок.")
         print(f"[OWNERID] Владелец сохранён: {user_name} -> {chat_id}")
+        return
+
+    if text.strip() in ("/menu", "/помощь", "/help", "меню"):
+        is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
+        is_manager = MANAGER_CHAT_ID and (chat_id == MANAGER_CHAT_ID or user_id == MANAGER_CHAT_ID)
+        if not is_owner and not is_manager:
+            send_msg(chat_id, "Напишите что вам нужно или /start для новой заявки.")
+            return
+        btns = [
+            [{"type": "callback", "text": "Новая заявка", "payload": "/start"}],
+            [{"type": "callback", "text": "Отменить заявку", "payload": "/cancel"}],
+        ]
+        menu_text = (
+            "Меню:\n\n"
+            "/price — прайс-лист\n"
+            "/start — новая заявка\n"
+            "/cancel — отменить текущую\n"
+        )
+        if is_manager or is_owner:
+            btns.append([{"type": "callback", "text": "Список заявок", "payload": "/заявки"}])
+            menu_text += "/заявки — последние заявки\n"
+        if is_owner:
+            btns.append([{"type": "callback", "text": "Статистика", "payload": "/stats"}])
+            menu_text += "/stats — статистика и воронка\n"
+        menu_text += "/menu — это меню"
+        send_msg(chat_id, menu_text, btns)
+        return
+
+    if text.strip() in ("/price", "/прайс", "/цены", "прайс", "цены"):
+        send_msg(chat_id, _format_price_list())
         return
 
     if text.strip() in ("/cancel", "/отмена"):
@@ -1052,6 +1345,7 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         new_state = advance(chat_id)
         if new_state >= 0:
             user_state[chat_id] = new_state
+            track_event("funnel_step", chat_id=chat_id, step=FUNNEL_NAMES.get(new_state, str(new_state)))
         return
 
     # Обработка текущего состояния
@@ -1075,17 +1369,19 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         tons = parse_tons(text, d.get("product"))
         if tons and tons > 0:
             d["tons"] = tons
-            # Если ввод в кубах — сохраняем тонны и уведомляем клиента
-            if re.search(r'куб|м[³3]', text.lower()):
-                d["volume_text"] = f"{tons} т"
+            # Если ввод в кубах — показываем конвертацию
+            m_vol = re.search(r"(\d+[.,]?\d*)\s*(куб\w*|м[³3]|кубометр\w*)", text.lower())
+            if m_vol:
+                raw_cubes = float(m_vol.group(1).replace(",", "."))
                 density = DENSITY.get(d.get("product", ""), DEFAULT_DENSITY)
-                send_msg(chat_id, f"Принял: {text} = {tons} тонн (плотность {density} т/м³)")
+                d["volume_text"] = f"{raw_cubes:.0f} м³ = {tons} т"
+                send_msg(chat_id, f"Принял: {raw_cubes:.0f} м³ × {density} т/м³ = {tons} тонн")
             else:
-                d["volume_text"] = text
+                d["volume_text"] = f"{tons} т"
         else:
             try_parse_freeform(text, chat_id)
             if not d.get("tons"):
-                send_msg(chat_id, "Пожалуйста, укажите объём числом, например: 30 или 15.5")
+                send_msg(chat_id, "Пожалуйста, укажите объём числом, например: 30 тонн или 20 кубов")
                 return
 
     elif state == DELIVERY:
@@ -1165,6 +1461,7 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
     new_state = advance(chat_id)
     if new_state >= 0:
         user_state[chat_id] = new_state
+        track_event("funnel_step", chat_id=chat_id, step=FUNNEL_NAMES.get(new_state, str(new_state)))
 
 
 def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
@@ -1180,7 +1477,8 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
 
     if payload == "voice_ok":
         print(f"[VOICE_CB] voice_ok: user_id={user_id}, chat_id={chat_id}, pending_keys={list(pending_voice.keys())}", flush=True)
-        entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
+        with _voice_lock:
+            entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
         if entry:
             transcribed, uname, uid, orig_chat_id = entry
             print(f"[VOICE_CB] found entry, orig_chat_id={orig_chat_id}, transcribed={transcribed!r}", flush=True)
@@ -1192,9 +1490,16 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
             answer_cb(callback_id)
         return
 
+    # Кнопки меню
+    if payload in ("/start", "/cancel", "/заявки", "/stats", "/menu"):
+        answer_cb(callback_id)
+        handle_message(chat_id, payload, "", user_id=user_id)
+        return
+
     if payload == "voice_retry":
-        entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
-        orig_chat_id = entry[3] if entry else (chat_id or user_id)
+        with _voice_lock:
+            entry = pending_voice.pop(chat_id, None) or pending_voice.pop(user_id, None)
+        orig_chat_id = entry[3] if (entry and len(entry) > 3) else (chat_id or user_id)
         answer_cb(callback_id)
         send_msg(orig_chat_id, "Хорошо, отправьте голосовое ещё раз.")
         return
@@ -1233,6 +1538,65 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
             user_state.pop(chat_id, None)
             user_data.pop(chat_id, None)
             save_state()
+        return
+
+    if payload == "use_saved_contacts":
+        d = user_state.get(chat_id, {})
+        saved = saved_contacts.get(chat_id, {})
+        d["contact_name"] = saved.get("contact_name", "")
+        d["phone"] = saved.get("phone", "")
+        if saved.get("address") and not d.get("address"):
+            d["address"] = saved["address"]
+        advance(chat_id, d)
+        return
+
+    if payload == "new_contacts":
+        d = user_state.get(chat_id, {})
+        d["step"] = "CONTACTS"
+        send_msg(
+            chat_id,
+            "Напишите имя, организацию (если есть) и номер телефона."
+        )
+        return
+
+    if payload == "confirm_edit":
+        d = user_state.get(chat_id, {})
+        edit_btns = []
+        if d.get("product"):
+            edit_btns.append([{"type": "callback", "text": "Товар", "payload": "edit_product"}])
+        if d.get("tons"):
+            edit_btns.append([{"type": "callback", "text": "Объём", "payload": "edit_volume"}])
+        if d.get("delivery"):
+            edit_btns.append([{"type": "callback", "text": "Доставка/Самовывоз", "payload": "edit_delivery"}])
+        if d.get("address"):
+            edit_btns.append([{"type": "callback", "text": "Адрес", "payload": "edit_address"}])
+        if d.get("phone"):
+            edit_btns.append([{"type": "callback", "text": "Телефон", "payload": "edit_phone"}])
+        send_msg(chat_id, "Что изменить?", edit_btns)
+        return
+
+    # Обработка конкретных edit_*
+    if payload.startswith("edit_"):
+        d = user_state.get(chat_id, {})
+        field = payload.replace("edit_", "")
+        if field == "product":
+            d.pop("product", None)
+            d.pop("price_per_ton", None)
+            d["step"] = "PRODUCT"
+        elif field == "volume":
+            d.pop("tons", None)
+            d["step"] = "VOLUME"
+        elif field == "delivery":
+            d.pop("delivery", None)
+            d["step"] = "DELIVERY"
+        elif field == "address":
+            d.pop("address", None)
+            d["step"] = "ADDRESS"
+        elif field == "phone":
+            d.pop("phone", None)
+            d.pop("contact_name", None)
+            d["step"] = "CONTACTS"
+        advance(chat_id, user_state.get(chat_id, {}))
         return
 
     if payload == "confirm_no":
@@ -1305,9 +1669,10 @@ def process_update(update: dict):
                 if audio_url and GROQ_API_KEY:
                     transcribed = transcribe_voice_url(audio_url)
                     if transcribed:
-                        pending_voice[chat_id] = (transcribed, user_name, user_id, chat_id)
-                        if user_id and user_id != chat_id:
-                            pending_voice[user_id] = (transcribed, user_name, user_id, chat_id)
+                        with _voice_lock:
+                            pending_voice[chat_id] = (transcribed, user_name, user_id, chat_id)
+                            if user_id and user_id != chat_id:
+                                pending_voice[user_id] = (transcribed, user_name, user_id, chat_id)
                         btns = [[
                             {"type": "callback", "text": "✅ Всё правильно", "payload": "voice_ok"},
                             {"type": "callback", "text": "🔄 Повторить", "payload": "voice_retry"},
@@ -1317,6 +1682,13 @@ def process_update(update: dict):
                         send_msg(chat_id, "Не смог распознать голосовое. Пожалуйста, напишите текстом.")
                 else:
                     send_msg(chat_id, "Голосовые сообщения пока не поддерживаются. Напишите текстом.")
+                return
+
+        # Фото/стикер/файл без текста и без голоса — подсказка
+        if attachments and not text:
+            has_voice_att = any(a.get("type","") in VOICE_TYPES for a in attachments)
+            if not has_voice_att:
+                send_msg(chat_id, "Я понимаю текст и голосовые сообщения. Напишите или наговорите что вам нужно 🙂")
                 return
 
         if text:
@@ -1340,6 +1712,111 @@ def process_update(update: dict):
 
 # ─── Главный цикл ─────────────────────────────────────────────────────────
 
+# ─── Еженедельный отчёт ────────────────────────────────────────────────────
+
+def build_weekly_report() -> str:
+    """Генерирует текст еженедельного отчёта."""
+    from collections import Counter
+    events = load_analytics(days=7)
+
+    def count(etype): return sum(1 for e in events if e.get("event") == etype)
+
+    started = count("conversation_started")
+    completed = count("order_completed")
+    replied = count("manager_replied")
+    conv = f"{round(completed/started*100)}%" if started else "—"
+
+    # Время ответа менеджера
+    reply_events = [e for e in events if e.get("event") == "manager_replied" and e.get("response_mins")]
+    if reply_events:
+        avg_resp = round(sum(e["response_mins"] for e in reply_events) / len(reply_events), 1)
+        max_resp = round(max(e["response_mins"] for e in reply_events), 1)
+        resp_str = f"  Среднее: {avg_resp} мин | Макс: {max_resp} мин"
+    else:
+        resp_str = "  нет данных"
+
+    # Воронка
+    funnel_events = [e for e in events if e.get("event") == "funnel_step"]
+    funnel_steps = {"product": set(), "volume": set(), "delivery": set(), "address": set(), "contacts": set(), "phone": set(), "confirm": set()}
+    for e in funnel_events:
+        step = e.get("step")
+        cid = e.get("chat_id")
+        if step in funnel_steps and cid:
+            funnel_steps[step].add(cid)
+    funnel_str = (
+        f"  Товар: {len(funnel_steps['product'])}\n"
+        f"  Объём: {len(funnel_steps['volume'])}\n"
+        f"  Доставка: {len(funnel_steps['delivery'])}\n"
+        f"  Адрес: {len(funnel_steps['address'])}\n"
+        f"  Контакты: {len(funnel_steps['contacts']) + len(funnel_steps['phone'])}\n"
+        f"  Подтверждение: {len(funnel_steps['confirm'])}\n"
+        f"  Оформлено: {completed}"
+    )
+
+    # Топ товаров
+    products = [e.get("product") for e in events if e.get("event") == "order_completed" and e.get("product")]
+    top = Counter(products).most_common(3)
+    top_str = "\n".join(f"  {p}: {n}" for p, n in top) or "  нет данных"
+
+    # Доставка vs самовывоз
+    deliveries = [e.get("delivery") for e in events if e.get("event") == "order_completed"]
+    d_count = deliveries.count("Доставка")
+    p_count = deliveries.count("Самовывоз")
+
+    return (
+        f"Еженедельный отчёт бота (Max)\n\n"
+        f"Диалоги: {started}\n"
+        f"Заявки оформлены: {completed}\n"
+        f"Конверсия: {conv}\n"
+        f"Ответов менеджера: {replied}\n"
+        f"Доставка: {d_count} | Самовывоз: {p_count}\n\n"
+        f"Время ответа менеджера:\n{resp_str}\n\n"
+        f"Воронка:\n{funnel_str}\n\n"
+        f"Топ товаров:\n{top_str}"
+    )
+
+
+def weekly_report_loop():
+    """Фоновый тред: отправляет отчёт владельцу по воскресеньям в 20:00 МСК."""
+    import datetime
+    last_sent_week = None
+    while True:
+        try:
+            # МСК = UTC+3
+            now_msk = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+            week_num = now_msk.isocalendar()[1]
+            # Воскресенье = 6 (weekday()), час >= 20
+            if now_msk.weekday() == 6 and now_msk.hour >= 20 and last_sent_week != week_num:
+                if OWNER_CHAT_ID:
+                    report = build_weekly_report()
+                    send_msg(OWNER_CHAT_ID, report)
+                    print(f"[WEEKLY] Отчёт отправлен владельцу {OWNER_CHAT_ID}", flush=True)
+                    last_sent_week = week_num
+        except Exception as e:
+            print(f"[WEEKLY] Ошибка: {e}", flush=True)
+        time.sleep(1800)  # проверяем каждые 30 минут
+
+
+# ─── Прайс-лист ───────────────────────────────────────────────────────────
+
+def _format_price_list():
+    """Формирует прайс-лист для отправки."""
+    lines = ["📋 <b>Прайс-лист Архиповского карьера</b>\n"]
+    lines.append("<b>Материал | Цена за тонну</b>")
+    lines.append("─" * 30)
+    for product, price in PRODUCTS.items():
+        if price is not None:
+            lines.append(f"▸ {product} — <b>{price} ₽/т</b>")
+        else:
+            lines.append(f"▸ {product} — <b>по запросу</b>")
+    lines.append("─" * 30)
+    lines.append("\n🚚 Доставка от 30 тонн — рассчитывается по расстоянию")
+    lines.append(f"📍 {BASE_NAME}")
+    lines.append(f"🕐 {WORK_HOURS}")
+    lines.append("\n💬 Для заказа напишите что вам нужно или /start")
+    return "\n".join(lines)
+
+
 def main():
     print("[STARTUP] Жду 45 сек перед запуском...", flush=True)
     time.sleep(45)
@@ -1350,6 +1827,11 @@ def main():
     print(f"[STARTUP] MANAGER_CHAT_ID = {MANAGER_CHAT_ID or 'НЕ ЗАДАН — заявки некуда слать!'}", flush=True)
     print(f"[STARTUP] OWNER_CHAT_ID   = {OWNER_CHAT_ID or 'не задан'}", flush=True)
     load_state()
+
+    # Запускаем фоновый тред для еженедельного отчёта
+    report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
+    report_thread.start()
+    print("[STARTUP] Еженедельный отчёт: воскресенье 20:00 МСК", flush=True)
 
     marker = None
     with ThreadPoolExecutor(max_workers=8) as pool:
