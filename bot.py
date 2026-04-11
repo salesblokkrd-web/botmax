@@ -470,7 +470,7 @@ def send_poll(chat_id: int, question: str, options: list) -> str:
     return poll_id
 
 
-def handle_poll_vote(user_id: int, callback_id: str, payload: str):
+def handle_poll_vote(user_id: int, callback_id: str, payload: str, orig_msg: dict = None):
     """Обработка голоса в опросе. Multiple choice: toggle vote."""
     parts = payload.split("_")
     # payload = pollvote_poll_<ts>_<counter>_<option_index>
@@ -481,6 +481,35 @@ def handle_poll_vote(user_id: int, callback_id: str, payload: str):
     poll_id = "_".join(parts[1:-1])  # poll_<ts>_<counter>
 
     poll = poll_data.get(poll_id)
+    # Восстановление опроса из callback message (если бот перезапустился)
+    if not poll and orig_msg:
+        try:
+            mid = orig_msg.get("body", {}).get("mid", "")
+            # Извлекаем варианты из кнопок
+            atts = orig_msg.get("body", {}).get("attachments", [])
+            options = []
+            for att in atts:
+                if att.get("type") == "inline_keyboard":
+                    for row in att.get("payload", {}).get("buttons", []):
+                        for btn in row:
+                            if btn.get("payload", "").startswith("pollvote_"):
+                                options.append(btn["text"])
+            if options:
+                # Извлекаем вопрос из первой строки текста
+                text_lines = orig_msg.get("body", {}).get("text", "").split("\n")
+                question = text_lines[0].replace("📊 ", "") if text_lines else "Опрос"
+                votes = {i: set() for i in range(len(options))}
+                poll_data[poll_id] = {
+                    "question": question,
+                    "options": options,
+                    "votes": votes,
+                    "message_id": mid,
+                }
+                poll = poll_data[poll_id]
+                print(f"[POLL] Восстановлен {poll_id} из callback: {len(options)} вариантов", flush=True)
+        except Exception as e:
+            print(f"[POLL] Ошибка восстановления: {e}", flush=True)
+
     if not poll:
         answer_cb(callback_id, "Опрос завершён")
         return
@@ -1674,7 +1703,7 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         track_event("funnel_step", chat_id=chat_id, step=FUNNEL_NAMES.get(new_state, str(new_state)))
 
 
-def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
+def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str, **kwargs):
     global processed_callbacks
     # Игнорируем повторные нажатия одной и той же кнопки
     if callback_id in processed_callbacks:
@@ -1843,7 +1872,7 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str):
 
     # Голоса в опросах
     if payload.startswith("pollvote_"):
-        handle_poll_vote(user_id, callback_id, payload)
+        handle_poll_vote(user_id, callback_id, payload, orig_msg=kwargs.get("orig_msg"))
         return
 
     answer_cb(callback_id)
@@ -1946,7 +1975,7 @@ def process_update(update: dict):
         orig_msg = cb.get("message", {})
         chat_id = orig_msg.get("recipient", {}).get("chat_id") or user_chat_map.get(user_id) or user_id
         print(f"[CB] user_id={user_id} chat_id={chat_id} payload={payload!r}", flush=True)
-        handle_callback(user_id, chat_id, callback_id, payload)
+        handle_callback(user_id, chat_id, callback_id, payload, orig_msg=orig_msg)
 
 
 # ─── Главный цикл ─────────────────────────────────────────────────────────
