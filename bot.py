@@ -1407,6 +1407,32 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
         print(f"[OWNERID] Владелец сохранён: {user_name} -> {chat_id}")
         return
 
+    # /poll <chat_id> <question> | opt1 | opt2 | ... — создать опрос (только владелец)
+    if text.strip().startswith("/poll "):
+        is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
+        if not is_owner:
+            send_msg(chat_id, "Команда доступна только владельцу.")
+            return
+        try:
+            raw = text.strip()[6:]
+            first_space = raw.index(" ")
+            target_chat = int(raw[:first_space])
+            rest = raw[first_space + 1:]
+            parts = [p.strip() for p in rest.split("|")]
+            question = parts[0]
+            options = parts[1:]
+            if len(options) < 2:
+                send_msg(chat_id, "Нужно минимум 2 варианта.\nФормат: /poll <chat_id> Вопрос? | вариант1 | вариант2")
+                return
+            pid = send_poll(target_chat, question, options)
+            if pid:
+                send_msg(chat_id, f"Опрос создан: {pid}\nВариантов: {len(options)}")
+            else:
+                send_msg(chat_id, "Ошибка создания опроса.")
+        except Exception as e:
+            send_msg(chat_id, f"Ошибка: {e}\nФормат: /poll <chat_id> Вопрос? | вариант1 | вариант2")
+        return
+
     if text.strip() in ("/menu", "/помощь", "/help", "меню"):
         is_owner = OWNER_CHAT_ID and (chat_id == OWNER_CHAT_ID or user_id == OWNER_CHAT_ID)
         is_manager = MANAGER_CHAT_ID and (chat_id == MANAGER_CHAT_ID or user_id == MANAGER_CHAT_ID)
