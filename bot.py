@@ -423,10 +423,11 @@ def send_photo_msg(chat_id: int, photo_url: str, caption: str = "") -> dict:
 def answer_cb(callback_id: str, notification: str = "") -> dict:
     if not callback_id:
         return {}
-    # Max API требует callback_id как URL-параметр, а не в теле
     params = {"callback_id": callback_id}
     body = {"notification": notification}
-    return _api("POST", "answers", params=params, body=body)
+    result = _api("POST", "answers", params=params, body=body)
+    print(f"[ANSWER_CB] notification={notification!r} result={result}", flush=True)
+    return result
 
 
 def get_updates(marker=None, timeout: int = 30) -> dict:
@@ -449,7 +450,9 @@ def edit_msg(message_id: str, text: str, buttons=None) -> dict:
             "type": "inline_keyboard",
             "payload": {"buttons": buttons}
         }]
-    return _api("PUT", "messages", params={"message_id": message_id}, body=body)
+    result = _api("PUT", "messages", params={"message_id": message_id}, body=body)
+    print(f"[EDIT_MSG] mid={message_id[:30]} result_ok={bool(result)}", flush=True)
+    return result
 
 
 def _format_poll_text(question: str, options: list, votes: dict) -> str:
@@ -512,13 +515,17 @@ def send_poll(chat_id: int, question: str, options: list) -> str:
 
 def handle_poll_vote(user_id: int, callback_id: str, payload: str, orig_msg: dict = None):
     """Обработка голоса в опросе. Multiple choice: toggle vote."""
+    print(f"[POLL_VOTE] START user={user_id} payload={payload} cb={callback_id[:20]}...", flush=True)
+    print(f"[POLL_VOTE] poll_data keys: {list(poll_data.keys())}", flush=True)
     parts = payload.split("_")
     # payload = pollvote_poll_<ts>_<counter>_<option_index>
     if len(parts) < 5:
+        print(f"[POLL_VOTE] ERROR: parts < 5: {parts}", flush=True)
         answer_cb(callback_id, "Ошибка опроса")
         return
     option_idx = int(parts[-1])
     poll_id = "_".join(parts[1:-1])  # poll_<ts>_<counter>
+    print(f"[POLL_VOTE] poll_id={poll_id} option_idx={option_idx}", flush=True)
 
     poll = poll_data.get(poll_id)
     # Восстановление опроса из callback message (если бот перезапустился)
