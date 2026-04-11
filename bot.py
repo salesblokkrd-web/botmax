@@ -396,7 +396,7 @@ def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> 
         req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", "quarry-max-bot/1.0")
     try:
-        with urllib.request.urlopen(req, timeout=35) as r:
+        with urllib.request.urlopen(req, timeout=15) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         print(f"[API] {method} /{endpoint} HTTP {e.code}: {e.read()[:300]}", flush=True)
@@ -1817,7 +1817,7 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str, 
         return
     processed_callbacks.add(callback_id)
     if len(processed_callbacks) > 2000:
-        processed_callbacks = set(list(processed_callbacks)[-1000:])
+        processed_callbacks.clear()  # reset: set has no order, can't keep "recent"
 
     if payload == "voice_ok":
         print(f"[VOICE_CB] voice_ok: user_id={user_id}, chat_id={chat_id}, pending_keys={list(pending_voice.keys())}", flush=True)
@@ -2217,8 +2217,8 @@ def _format_price_list():
 
 
 def main():
-    print("[STARTUP] Жду 45 сек перед запуском...", flush=True)
-    time.sleep(45)
+    print("[STARTUP] Запуск...", flush=True)
+    time.sleep(3)  # minimal delay for clean restart
     if not TOKEN:
         print("[STARTUP] ОШИБКА: MAX_BOT_TOKEN не задан!", flush=True)
         return
@@ -2227,6 +2227,11 @@ def main():
     print(f"[STARTUP] OWNER_CHAT_ID   = {OWNER_CHAT_ID or 'не задан'}", flush=True)
     load_state()
     _load_polls()
+    # Clear stale wizard states (wizard data not persisted across restarts)
+    stale_keys = [k for k, v in user_state.items() if isinstance(v, str) and v.startswith("poll_wiz")]
+    for k in stale_keys:
+        user_state.pop(k, None)
+        print(f"[STARTUP] Cleared stale wizard state for {k}", flush=True)
 
     # Запускаем фоновый тред для еженедельного отчёта
     report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
@@ -2234,7 +2239,7 @@ def main():
     print("[STARTUP] Еженедельный отчёт: воскресенье 20:00 МСК", flush=True)
 
     marker = None
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         while True:
             try:
                 resp = get_updates(marker=marker, timeout=30)
@@ -2249,7 +2254,8 @@ def main():
                 print("[SHUTDOWN] Остановлен.", flush=True)
                 break
             except Exception as e:
-                print(f"[ERROR] polling: {e}", flush=True)
+                import traceback
+                print(f"[ERROR] polling: {e}\n{traceback.format_exc()[:300]}", flush=True)
                 time.sleep(5)
 
 
