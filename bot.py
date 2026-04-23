@@ -21,8 +21,11 @@ from typing import Optional, List
 TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-MANAGER_ID_FILE = "manager_id.txt"
-OWNER_ID_FILE = "owner_id.txt"
+DATA_DIR = "/data" if os.path.exists("/data") else "."
+os.makedirs(DATA_DIR, exist_ok=True)
+
+MANAGER_ID_FILE = os.path.join(DATA_DIR, "manager_id.txt")
+OWNER_ID_FILE = os.path.join(DATA_DIR, "owner_id.txt")
 
 def _load_id(filepath):
     try:
@@ -222,7 +225,7 @@ POLL_WIZ_TARGET = "poll_wiz_target"
 #   "chat_id": int,
 #   "message_id": str,
 # }
-POLLS_FILE = "polls.json"
+POLLS_FILE = os.path.join(DATA_DIR, "polls.json")
 poll_data: dict = {}
 _poll_counter = 0
 _poll_lock = threading.Lock()
@@ -281,9 +284,9 @@ def get_user_lock(chat_id: int) -> threading.Lock:
         return _user_locks[chat_id]
 
 
-STATE_FILE = "bot_state.json"
-ANALYTICS_FILE = "analytics.json"
-ORDERS_FILE = "orders.json"
+STATE_FILE = os.path.join(DATA_DIR, "bot_state.json")
+ANALYTICS_FILE = os.path.join(DATA_DIR, "analytics.json")
+ORDERS_FILE = os.path.join(DATA_DIR, "orders.json")
 
 
 def save_order(order: dict):

@@ -1,4 +1,5 @@
 meta:
+  persistenceMount: /data
   environment: python
   toolchain:
     name: pip
