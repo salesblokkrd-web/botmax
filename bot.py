@@ -2216,10 +2216,8 @@ def process_update(update: dict):
         body = msg.get("body", {})
         text = (body.get("text") or "").strip()
 
-        # Логируем все групповые сообщения для диагностики group ID
-        recipient_type = msg.get("recipient", {}).get("chat_type", "")
-        if recipient_type in ("group", "channel") or (isinstance(chat_id, int) and chat_id < 0):
-            _debug_log_chat(chat_id, user_name, text[:50] if text else "")
+        # Логируем ВСЕ входящие сообщения для диагностики
+        _debug_log_chat(chat_id, user_name, text[:80] if text else f"[no text, update_type={utype}]")
 
         # Сообщение из группы производства — отдельная обработка
         if chat_id == BLOK_GROUP_ID:
