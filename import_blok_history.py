@@ -455,10 +455,6 @@ def main():
     else:
         print("\n[dry-run] Рейсы НЕ записаны в Sheets")
 
-    # Уведомляем хозяина в Telegram
-    notify = build_notify_text(all_trips, DRY_RUN)
-    tg_send(notify)
-    print("\nУведомление отправлено в Telegram")
     print("\n✅ Готово!")
 
 
