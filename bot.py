@@ -4,6 +4,7 @@ import os
 import json
 import time
 import math
+import datetime
 import threading
 import urllib.request
 import urllib.parse
@@ -45,6 +46,12 @@ BASE_COORDS = (44.992753, 39.838747)
 BASE_NAME = "Архиповский карьер (с. Архиповское, Белореченский р-н)"
 RATE_PER_TON_KM = 5
 WORK_HOURS = "пн–сб 8:00–18:00"
+
+# ─── Группа производства "Архиповский блок" ───────────────────────────────
+BLOK_GROUP_ID = int(os.environ.get("BLOK_GROUP_ID", "-72678007708240"))
+GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")  # base64(service_account.json)
+SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
+CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 
 PRODUCTS = {
     "Отсев 0-5":             614,
@@ -2043,6 +2050,120 @@ def process_update_safe(update: dict):
             lock.release()
 
 
+# ─── Мониторинг группы "Архиповский блок" ─────────────────────────────────
+
+def _log_blok_message(sender_name: str, text: str, raw: dict):
+    """Пишем сырое сообщение из группы в лог-файл для анализа формата."""
+    log_path = os.path.join(DATA_DIR, "blok_group_log.jsonl")
+    entry = {
+        "ts": datetime.datetime.now().isoformat(),
+        "sender": sender_name,
+        "text": text,
+        "raw": raw,
+    }
+    with threading.Lock():
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    print(f"[BLOK_GROUP] {sender_name}: {text[:80]}", flush=True)
+
+
+def _parse_blok_plan_claude(text: str) -> list:
+    """Парсит план менеджера через Claude API. Возвращает список рейсов."""
+    if not CLAUDE_API_KEY:
+        return []
+    prompt = f"""Ты парсер производственных заданий. Из текста извлеки список рейсов.
+Каждый рейс — объект JSON с полями:
+- date: дата в формате YYYY-MM-DD (если не указана — сегодня {datetime.date.today()})
+- truck: номер или название машины
+- block_type: тип блока (например "Блок 20 отсев", "Блок 9 керамзит")
+- pallets: количество поддонов (число)
+- client: название клиента/организации
+- address: адрес доставки
+- time: время доставки (строка, например "10:00")
+
+Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
+
+Текст задания:
+{text}"""
+
+    body = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}]
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "x-api-key": CLAUDE_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read())
+        raw_text = resp["content"][0]["text"].strip()
+        # Убираем markdown-блок если есть
+        raw_text = re.sub(r'^```[a-z]*\n?', '', raw_text)
+        raw_text = re.sub(r'\n?```$', '', raw_text)
+        return json.loads(raw_text)
+    except Exception as e:
+        print(f"[BLOK_PARSE] Ошибка: {e}", flush=True)
+        return []
+
+
+def _write_trips_to_sheets(trips: list):
+    """Записывает рейсы в лист 'Рейсы' Google Sheets через gspread."""
+    if not trips or not GOOGLE_SA_B64:
+        return
+    try:
+        import base64, tempfile
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+        ws = sh.worksheet("Рейсы")
+        for trip in trips:
+            row = [
+                trip.get("date") or str(datetime.date.today()),
+                trip.get("truck") or "",
+                trip.get("block_type") or "",
+                trip.get("pallets") or "",
+                trip.get("client") or "",
+                trip.get("address") or "",
+                trip.get("time") or "",
+            ]
+            ws.append_row(row, value_input_option="USER_ENTERED")
+            print(f"[BLOK_SHEETS] Добавлен рейс: {row}", flush=True)
+    except Exception as e:
+        print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
+
+
+def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
+    """Основная точка входа для сообщений из группы производства."""
+    _log_blok_message(sender_name, text, raw_msg)
+
+    # Ищем признаки плана менеджера (ключевые слова)
+    keywords = ("план", "блок", "поддон", "рейс", "везёт", "везет", "доставка")
+    if not any(kw in text.lower() for kw in keywords):
+        return  # Не похоже на задание — просто логируем
+
+    trips = _parse_blok_plan_claude(text)
+    if not trips:
+        print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
+        return
+
+    print(f"[BLOK_GROUP] Распарсено {len(trips)} рейс(а): {trips}", flush=True)
+    _write_trips_to_sheets(trips)
+
+
 def process_update(update: dict):
     utype = update.get("update_type")
 
@@ -2059,6 +2180,12 @@ def process_update(update: dict):
         user_name = sender.get("name", "")
         body = msg.get("body", {})
         text = (body.get("text") or "").strip()
+
+        # Сообщение из группы производства — отдельная обработка
+        if chat_id == BLOK_GROUP_ID:
+            if text:
+                handle_blok_group_message(user_name, text, msg)
+            return  # не пускаем в основную логику бота
 
         # Голосовое / аудио
         VOICE_TYPES = ("audio", "voice", "audio_msg", "audio_message", "voice_message")
