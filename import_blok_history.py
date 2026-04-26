@@ -414,24 +414,41 @@ def main():
     log(f"DATA_DIR={DATA_DIR}, CHECKPOINT={CHECKPOINT_FILE}")
     log(f"TOKEN={'OK' if TOKEN else 'MISSING'} CLAUDE={'OK' if CLAUDE_API_KEY else 'MISSING'} SHEETS={'OK' if GOOGLE_SA_B64 else 'MISSING'}")
 
+    diag_lines = []
+
+    def diag(msg: str):
+        log(msg)
+        diag_lines.append(msg)
+
+    def send_diag(final_msg: str = ""):
+        if not TG_TOKEN:
+            return
+        text = "<b>📊 Блок-агент диагностика</b>\n" + "\n".join(diag_lines[-20:])
+        if final_msg:
+            text += f"\n\n{final_msg}"
+        tg_send(text)
+
     for name, val in [("MAX_BOT_TOKEN", TOKEN), ("CLAUDE_API_KEY", CLAUDE_API_KEY), ("GOOGLE_SA_B64", GOOGLE_SA_B64)]:
         if not val:
-            log(f"ОШИБКА: {name} не задан!")
+            diag(f"ОШИБКА: {name} не задан!")
+            send_diag("❌ Критическая ошибка — нет env vars")
             sys.exit(1)
 
     if DRY_RUN:
-        log("=== РЕЖИМ PREVIEW (dry-run) — в Sheets НЕ пишем ===")
+        diag("РЕЖИМ PREVIEW (dry-run) — в Sheets НЕ пишем")
 
     # 1. Загружаем чекпоинт
     from_ts = load_checkpoint()
+    diag(f"GROUP_ID={GROUP_ID}, from_ts={from_ts}")
 
     # 2. Читаем новые сообщения из MAX группы
-    log(f"Читаем сообщения из группы (GROUP_ID={GROUP_ID})...")
+    diag(f"Читаем сообщения из группы (GROUP_ID={GROUP_ID})...")
     messages = get_new_messages(from_ts)
-    log(f"Новых сообщений: {len(messages)}")
+    diag(f"Новых сообщений: {len(messages)}")
 
     if not messages:
-        log("Нет новых сообщений. Выход.")
+        diag("Нет новых сообщений. Выход.")
+        send_diag("⚠️ 0 сообщений из группы")
         return
 
     # 3. Фильтруем планы менеджера
@@ -445,12 +462,12 @@ def main():
         sender = msg.get("sender", {}).get("name", "?")
         plan_msgs.append({"dt": dt, "date": dt[:10], "sender": sender, "text": text, "ts": ts})
 
-    log(f"Сообщений-планов: {len(plan_msgs)}")
+    diag(f"Сообщений-планов: {len(plan_msgs)} из {len(messages)}")
 
     # 4. Парсим каждое сообщение
     all_trips = []
     for pm in plan_msgs:
-        log(f"[{pm['dt']}] {pm['sender']}: {pm['text'][:70]}")
+        diag(f"[{pm['dt']}] {pm['sender']}: {pm['text'][:70]}")
         trips = claude_parse(pm["text"], pm["date"])
         for t in trips:
             if not t.get("date"):
@@ -458,13 +475,14 @@ def main():
             log(f"  → {t}")
         all_trips.extend(trips)
 
-    log(f"=== Итого рейсов: {len(all_trips)} ===")
+    diag(f"=== Итого рейсов: {len(all_trips)} ===")
 
     if not all_trips:
         last_ts = max(m.get("timestamp", 0) for m in messages)
         if not DRY_RUN:
             save_checkpoint(last_ts)
-        log("Рейсов для записи нет.")
+        diag("Рейсов для записи нет.")
+        send_diag("⚠️ Рейсов не найдено (сообщения есть, планов нет)")
         return
 
     # 5. Записываем в Sheets
@@ -480,6 +498,7 @@ def main():
         log("[dry-run] Рейсы НЕ записаны в Sheets")
 
     log("=== ГОТОВО ===")
+    send_diag(build_notify_text(all_trips, DRY_RUN))
 
 
 if __name__ == "__main__":
