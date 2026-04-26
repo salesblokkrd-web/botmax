@@ -2459,6 +2459,19 @@ def main():
     else:
         print("[STARTUP] Blok sync ОТКЛЮЧЁН (нет CLAUDE_API_KEY или GOOGLE_SA_B64)", flush=True)
 
+    # Диагностика: пишем info о боте и его чатах в файл
+    try:
+        me = _api("GET", "me")
+        chats_resp = _api("GET", "chats", params={"count": 50})
+        diag_path = os.path.join(DATA_DIR, "bot_diag.json")
+        with open(diag_path, "w", encoding="utf-8") as f:
+            json.dump({"me": me, "chats": chats_resp}, f, ensure_ascii=False, indent=2)
+        print(f"[STARTUP] Bot name: {me.get('name')} @{me.get('username')}", flush=True)
+        for c in chats_resp.get("chats", []):
+            print(f"[STARTUP] Chat: id={c.get('chat_id')} type={c.get('type')} title={c.get('title')}", flush=True)
+    except Exception as e:
+        print(f"[STARTUP] Диагностика ошибка: {e}", flush=True)
+
     marker = None
     with ThreadPoolExecutor(max_workers=6) as pool:
         while True:
