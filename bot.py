@@ -48,7 +48,7 @@ RATE_PER_TON_KM = 5
 WORK_HOURS = "пн–сб 8:00–18:00"
 
 # ─── Группа производства "Архиповский блок" ───────────────────────────────
-BLOK_GROUP_ID = int(os.environ.get("BLOK_GROUP_ID", "-72678007708240"))
+BLOK_GROUP_ID = int(os.environ.get("BLOK_GROUP_ID", "-68840834804304"))  # Производство Тихорецкая
 GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")  # base64(service_account.json)
 SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
@@ -2343,6 +2343,32 @@ def build_weekly_report() -> str:
     )
 
 
+def _reset_checkpoint_if_needed():
+    """Сбрасывает чекпоинт если GROUP_ID изменился."""
+    checkpoint_path = os.path.join(DATA_DIR, "blok_checkpoint.json")
+    try:
+        with open(checkpoint_path) as f:
+            data = json.load(f)
+        saved_group = data.get("group_id")
+        if saved_group and saved_group != BLOK_GROUP_ID:
+            print(f"[BLOK_SYNC] GROUP_ID изменился ({saved_group} → {BLOK_GROUP_ID}), сброс чекпоинта", flush=True)
+            with open(checkpoint_path, "w") as f:
+                json.dump({"last_ts_ms": 0, "last_dt": "reset", "group_id": BLOK_GROUP_ID}, f)
+        elif not saved_group:
+            # Дописываем group_id в существующий чекпоинт
+            data["group_id"] = BLOK_GROUP_ID
+            # Если ts из старой группы — тоже сбрасываем
+            old_ts = data.get("last_ts_ms", 0)
+            if old_ts > 0:
+                print(f"[BLOK_SYNC] Сброс чекпоинта (старая группа без group_id)", flush=True)
+                data["last_ts_ms"] = 0
+                data["last_dt"] = "reset"
+            with open(checkpoint_path, "w") as f:
+                json.dump(data, f)
+    except FileNotFoundError:
+        pass
+
+
 def _run_blok_import():
     """Запускает import_blok_history.py как подпроцесс."""
     import subprocess
@@ -2450,6 +2476,9 @@ def main():
     report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
     report_thread.start()
     print("[STARTUP] Еженедельный отчёт: воскресенье 20:00 МСК", flush=True)
+
+    # Сбрасываем чекпоинт если GROUP_ID изменился
+    _reset_checkpoint_if_needed()
 
     # Запускаем фоновый тред синхронизации группы Архиповский блок
     if CLAUDE_API_KEY and GOOGLE_SA_B64:

@@ -29,7 +29,7 @@ OWNER_TG_ID = int(os.environ.get("SECRETARY_ADMIN_ID", "215294536"))
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")
 SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
-GROUP_ID = -72678007708240
+GROUP_ID = -68840834804304  # Производство Тихорецкая
 
 DATA_DIR = "/data" if os.path.exists("/data") else "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -68,11 +68,13 @@ def log(msg: str):
 # ─── Чекпоинт ──────────────────────────────────────────────────────────────
 
 def load_checkpoint() -> int:
-    """Возвращает timestamp (мс) с которого читать. 0 = с самого начала (FIRST_RUN_DATE)."""
+    """Возвращает timestamp (мс) с которого читать."""
     try:
         with open(CHECKPOINT_FILE) as f:
             data = json.load(f)
             ts = data.get("last_ts_ms", 0)
+            if not ts:
+                raise FileNotFoundError
             dt = datetime.datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M")
             log(f"[Чекпоинт] Продолжаем с {dt} (ts={ts})")
             return ts
@@ -85,7 +87,7 @@ def load_checkpoint() -> int:
 def save_checkpoint(last_ts_ms: int):
     dt = datetime.datetime.fromtimestamp(last_ts_ms / 1000).strftime("%Y-%m-%d %H:%M")
     with open(CHECKPOINT_FILE, "w") as f:
-        json.dump({"last_ts_ms": last_ts_ms, "last_dt": dt}, f)
+        json.dump({"last_ts_ms": last_ts_ms, "last_dt": dt, "group_id": GROUP_ID}, f)
     log(f"[Чекпоинт] Сохранён: {dt}")
 
 
