@@ -2305,6 +2305,34 @@ def build_weekly_report() -> str:
     )
 
 
+def blok_sync_loop():
+    """Фоновый тред: каждые 4 часа читает группу Архиповский блок и разносит в Sheets."""
+    import subprocess
+    import sys as _sys
+    last_run_hour = None
+    RUN_HOURS = {8, 12, 16, 20}  # МСК — 4 раза в день
+    while True:
+        try:
+            now_msk = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+            hour = now_msk.hour
+            if hour in RUN_HOURS and last_run_hour != (now_msk.date(), hour):
+                last_run_hour = (now_msk.date(), hour)
+                print(f"[BLOK_SYNC] Запуск импорта {now_msk.strftime('%Y-%m-%d %H:%M')}", flush=True)
+                script = os.path.join(os.path.dirname(_sys.argv[0]) or ".", "import_blok_history.py")
+                result = subprocess.run(
+                    [_sys.executable, script],
+                    capture_output=True, text=True, timeout=120
+                )
+                print(f"[BLOK_SYNC] Завершён (rc={result.returncode})", flush=True)
+                if result.stdout:
+                    print(result.stdout[-500:], flush=True)
+                if result.stderr:
+                    print(f"[BLOK_SYNC_ERR] {result.stderr[-200:]}", flush=True)
+        except Exception as e:
+            print(f"[BLOK_SYNC] Ошибка: {e}", flush=True)
+        time.sleep(600)  # проверяем каждые 10 минут
+
+
 def weekly_report_loop():
     """Фоновый тред: отправляет отчёт владельцу по воскресеньям в 20:00 МСК."""
     import datetime
@@ -2367,6 +2395,14 @@ def main():
     report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
     report_thread.start()
     print("[STARTUP] Еженедельный отчёт: воскресенье 20:00 МСК", flush=True)
+
+    # Запускаем фоновый тред синхронизации группы Архиповский блок
+    if CLAUDE_API_KEY and GOOGLE_SA_B64:
+        sync_thread = threading.Thread(target=blok_sync_loop, daemon=True)
+        sync_thread.start()
+        print("[STARTUP] Blok sync: каждые 4 часа (8, 12, 16, 20 МСК)", flush=True)
+    else:
+        print("[STARTUP] Blok sync ОТКЛЮЧЁН (нет CLAUDE_API_KEY или GOOGLE_SA_B64)", flush=True)
 
     marker = None
     with ThreadPoolExecutor(max_workers=6) as pool:

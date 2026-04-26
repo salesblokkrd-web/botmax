@@ -23,6 +23,9 @@ DRY_RUN = "--dry-run" in sys.argv
 
 # ─── Конфиг ────────────────────────────────────────────────────────────────
 TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
+# Telegram для уведомлений хозяину о том что разнесено
+TG_TOKEN = os.environ.get("SECRETARY_BOT_TOKEN", "") or os.environ.get("TG_NOTIFY_TOKEN", "8236673333:AAFrneMqVjwRSWrrj2V7qFFUxrSkzX16Z3U")
+OWNER_TG_ID = int(os.environ.get("OWNER_CHAT_ID", "246872515"))
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")
 SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
@@ -264,6 +267,42 @@ def _find_col(header: list, keywords: list) -> int | None:
     return None
 
 
+# ─── Telegram уведомление ──────────────────────────────────────────────────
+
+def tg_send(text: str):
+    """Отправляем уведомление хозяину в Telegram."""
+    if not TG_TOKEN or not OWNER_TG_ID:
+        return
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    body = json.dumps({
+        "chat_id": OWNER_TG_ID,
+        "text": text,
+        "parse_mode": "HTML",
+    }).encode()
+    try:
+        req = urllib.request.Request(url, data=body,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            pass
+    except Exception as e:
+        print(f"[TG ERROR] {e}")
+
+
+def build_notify_text(trips: list, dry_run: bool) -> str:
+    mode = "🔍 PREVIEW (не записано)" if dry_run else "✅ Разнесено в таблицу"
+    lines = [f"<b>Архиповский блок — {mode}</b>", ""]
+    for t in trips:
+        wh = t.get("warehouse") or "?"
+        icon = "🏭" if wh == "КРД" else "⛏" if wh == "Карьер" else "❓"
+        lines.append(
+            f"{icon} {t.get('date')} | {t.get('block_type')} {t.get('pallets')}пд"
+            f" → {t.get('client') or '?'} | склад: {wh}"
+        )
+    if not trips:
+        lines.append("Рейсов не найдено")
+    return "\n".join(lines)
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -334,6 +373,10 @@ def main():
     else:
         print("\n[dry-run] Рейсы НЕ записаны в Sheets")
 
+    # Уведомляем хозяина в Telegram
+    notify = build_notify_text(all_trips, DRY_RUN)
+    tg_send(notify)
+    print("\nУведомление отправлено в Telegram")
     print("\n✅ Готово!")
 
 
