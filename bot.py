@@ -2328,32 +2328,49 @@ def build_weekly_report() -> str:
     )
 
 
-def blok_sync_loop():
-    """Фоновый тред: каждые 4 часа читает группу Архиповский блок и разносит в Sheets."""
+def _run_blok_import():
+    """Запускает import_blok_history.py как подпроцесс."""
     import subprocess
     import sys as _sys
-    last_run_hour = None
-    RUN_HOURS = {8, 12, 16, 20}  # МСК — 4 раза в день
+    script = os.path.join(os.path.dirname(os.path.abspath(_sys.argv[0])), "import_blok_history.py")
+    print(f"[BLOK_SYNC] Запуск: {script}", flush=True)
+    result = subprocess.run(
+        [_sys.executable, script],
+        capture_output=True, text=True, encoding="utf-8", timeout=180
+    )
+    print(f"[BLOK_SYNC] Завершён (rc={result.returncode})", flush=True)
+    if result.stdout:
+        print(result.stdout[-800:], flush=True)
+    if result.stderr:
+        print(f"[BLOK_SYNC_ERR] {result.stderr[-300:]}", flush=True)
+
+
+def blok_sync_loop():
+    """Фоновый тред: сразу при старте + каждые 4 часа (8, 12, 16, 20 МСК)."""
+    last_run_key = None
+    RUN_HOURS = {8, 12, 16, 20}
+
+    # Первый запуск — через 2 минуты после старта бота (дать время инициализироваться)
+    print("[BLOK_SYNC] Первый запуск через 2 минуты...", flush=True)
+    time.sleep(120)
+    try:
+        _run_blok_import()
+        last_run_key = ("startup",)
+    except Exception as e:
+        print(f"[BLOK_SYNC] Ошибка при старте: {e}", flush=True)
+
     while True:
         try:
+            time.sleep(600)  # проверяем каждые 10 минут
             now_msk = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
             hour = now_msk.hour
-            if hour in RUN_HOURS and last_run_hour != (now_msk.date(), hour):
-                last_run_hour = (now_msk.date(), hour)
-                print(f"[BLOK_SYNC] Запуск импорта {now_msk.strftime('%Y-%m-%d %H:%M')}", flush=True)
-                script = os.path.join(os.path.dirname(_sys.argv[0]) or ".", "import_blok_history.py")
-                result = subprocess.run(
-                    [_sys.executable, script],
-                    capture_output=True, text=True, timeout=120
-                )
-                print(f"[BLOK_SYNC] Завершён (rc={result.returncode})", flush=True)
-                if result.stdout:
-                    print(result.stdout[-500:], flush=True)
-                if result.stderr:
-                    print(f"[BLOK_SYNC_ERR] {result.stderr[-200:]}", flush=True)
+            run_key = (now_msk.date(), hour)
+            if hour in RUN_HOURS and last_run_key != run_key:
+                last_run_key = run_key
+                print(f"[BLOK_SYNC] Плановый запуск {now_msk.strftime('%Y-%m-%d %H:%M')}", flush=True)
+                _run_blok_import()
         except Exception as e:
             print(f"[BLOK_SYNC] Ошибка: {e}", flush=True)
-        time.sleep(600)  # проверяем каждые 10 минут
 
 
 def weekly_report_loop():

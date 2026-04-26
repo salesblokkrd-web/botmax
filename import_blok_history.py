@@ -24,8 +24,8 @@ DRY_RUN = "--dry-run" in sys.argv
 # ─── Конфиг ────────────────────────────────────────────────────────────────
 TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 # Telegram для уведомлений хозяину о том что разнесено
-TG_TOKEN = os.environ.get("SECRETARY_BOT_TOKEN", "") or os.environ.get("TG_NOTIFY_TOKEN", "8236673333:AAFrneMqVjwRSWrrj2V7qFFUxrSkzX16Z3U")
-OWNER_TG_ID = int(os.environ.get("OWNER_CHAT_ID", "246872515"))
+TG_TOKEN = os.environ.get("SECRETARY_BOT_TOKEN", "")
+OWNER_TG_ID = int(os.environ.get("SECRETARY_ADMIN_ID", "215294536"))
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")
 SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
