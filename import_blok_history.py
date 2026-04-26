@@ -31,9 +31,10 @@ GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")
 SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
 GROUP_ID = -72678007708240
 
-DATA_DIR = "/app/data" if os.path.exists("/app") else "data"
+DATA_DIR = "/data" if os.path.exists("/data") else "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 CHECKPOINT_FILE = os.path.join(DATA_DIR, "blok_checkpoint.json")
+LOG_FILE = os.path.join(DATA_DIR, "blok_import.log")
 
 # Стартовая дата если чекпоинт не найден
 FIRST_RUN_DATE = datetime.datetime(2026, 4, 6, 0, 0, 0)
@@ -42,6 +43,26 @@ MAX_API = "https://botapi.max.ru"
 ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
 
 ssl_ctx = ssl.create_default_context()
+
+_log_fh = None
+
+def log(msg: str):
+    """Пишем и на stdout и в файл."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    global _log_fh
+    if _log_fh is None:
+        try:
+            _log_fh = open(LOG_FILE, "a", encoding="utf-8")
+        except Exception:
+            pass
+    if _log_fh:
+        try:
+            _log_fh.write(line + "\n")
+            _log_fh.flush()
+        except Exception:
+            pass
 
 
 # ─── Чекпоинт ──────────────────────────────────────────────────────────────
@@ -53,20 +74,19 @@ def load_checkpoint() -> int:
             data = json.load(f)
             ts = data.get("last_ts_ms", 0)
             dt = datetime.datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M")
-            print(f"[Чекпоинт] Продолжаем с {dt} (ts={ts})")
+            log(f"[Чекпоинт] Продолжаем с {dt} (ts={ts})")
             return ts
     except FileNotFoundError:
         ts = int(FIRST_RUN_DATE.timestamp() * 1000)
-        print(f"[Чекпоинт] Первый запуск — читаем с {FIRST_RUN_DATE.date()}")
+        log(f"[Чекпоинт] Первый запуск — читаем с {FIRST_RUN_DATE.date()}")
         return ts
 
 
 def save_checkpoint(last_ts_ms: int):
-    """Сохраняем позицию после успешной обработки."""
     dt = datetime.datetime.fromtimestamp(last_ts_ms / 1000).strftime("%Y-%m-%d %H:%M")
     with open(CHECKPOINT_FILE, "w") as f:
         json.dump({"last_ts_ms": last_ts_ms, "last_dt": dt}, f)
-    print(f"[Чекпоинт] Сохранён: {dt}")
+    log(f"[Чекпоинт] Сохранён: {dt}")
 
 
 # ─── MAX API ────────────────────────────────────────────────────────────────
@@ -93,15 +113,16 @@ def get_new_messages(from_ts_ms: int) -> list:
                 "from": cursor,
             })
         except Exception as e:
-            print(f"[MAX API ERROR] {e}")
+            log(f"[MAX API ERROR] {e}")
             break
 
         batch = resp.get("messages", [])
         if not batch:
+            log(f"  MAX API вернул пустой список (cursor={cursor}). resp keys: {list(resp.keys())}")
             break
 
         messages.extend(batch)
-        print(f"  Получено {len(batch)} сообщений (всего {len(messages)})")
+        log(f"  Получено {len(batch)} сообщений (всего {len(messages)})")
 
         if len(batch) < 100:
             break  # Конец страниц
@@ -194,7 +215,7 @@ def claude_parse(text: str, msg_date: str) -> list:
         result = json.loads(raw)
         return result if isinstance(result, list) else []
     except Exception as e:
-        print(f"  [CLAUDE ERROR] {e}")
+        log(f"  [CLAUDE ERROR] {e}")
         return []
 
 
@@ -226,7 +247,7 @@ def write_trips(trips: list, gc):
             trip.get("warehouse") or "",
         ]
         ws.append_row(row, value_input_option="USER_ENTERED")
-        print(f"  ✓ Рейс: {row[0]} | {row[2]} {row[3]}пд | {row[5]} | склад={row[8]}")
+        log(f"  ✓ Рейс: {row[0]} | {row[2]} {row[3]}пд | {row[5]} | склад={row[8]}")
 
 
 def update_stock(trips: list, gc):
@@ -244,14 +265,14 @@ def update_stock(trips: list, gc):
         pallets = trip.get("pallets")
         if not wh or not bt or not pallets:
             if not wh:
-                print(f"  [СКЛАД] Склад не указан: {trip.get('block_type')} {trip.get('pallets')}пд — пропуск")
+                log(f"  [СКЛАД] Склад не указан: {trip.get('block_type')} {trip.get('pallets')}пд — пропуск")
             continue
         key = (wh.upper(), bt)
         totals[key] = totals.get(key, 0) + int(pallets)
 
     for (wh, block_type), total_pallets in totals.items():
         sheet_name = "КРД(склад)" if wh == "КРД" else "Карьер(склад)"
-        print(f"\n  [СКЛАД] {sheet_name} | {block_type} | -{total_pallets} поддонов")
+        log(f"[СКЛАД] {sheet_name} | {block_type} | -{total_pallets} поддонов")
         try:
             ws = sh.worksheet(sheet_name)
             data = ws.get_all_values()
@@ -259,8 +280,7 @@ def update_stock(trips: list, gc):
             for i, row in enumerate(data):
                 if _row_matches_block(row, block_type):
                     found = True
-                    print(f"    Строка {i+1}: {row[:6]}")
-                    # Ищем столбец "Отгрузка" в заголовке
+                    log(f"    Строка {i+1}: {row[:6]}")
                     header = data[0] if data else []
                     col_idx = _find_col(header, ["отгрузка", "отгр"])
                     if col_idx is not None:
@@ -269,14 +289,14 @@ def update_stock(trips: list, gc):
                         new_val = old_val + total_pallets
                         if not DRY_RUN:
                             ws.update_cell(i + 1, col_idx + 1, new_val)
-                        print(f"    Отгрузка: {old_val} → {new_val} (столбец {col_idx+1})")
+                        log(f"    Отгрузка: {old_val} → {new_val} (столбец {col_idx+1})")
                     else:
-                        print(f"    [!] Столбец 'Отгрузка' не найден в заголовке: {header[:8]}")
+                        log(f"    [!] Столбец 'Отгрузка' не найден в заголовке: {header[:8]}")
                     break
             if not found:
-                print(f"    [!] Тип блока '{block_type}' не найден в {sheet_name}")
+                log(f"    [!] Тип блока '{block_type}' не найден в {sheet_name}")
         except Exception as e:
-            print(f"    [ОШИБКА] {e}")
+            log(f"    [ОШИБКА] {e}")
 
 
 def _normalize_block_type(bt: str) -> dict:
@@ -367,7 +387,7 @@ def tg_send(text: str):
         with urllib.request.urlopen(req, timeout=10) as r:
             pass
     except Exception as e:
-        print(f"[TG ERROR] {e}")
+        log(f"[TG ERROR] {e}")
 
 
 def build_notify_text(trips: list, dry_run: bool) -> str:
@@ -388,24 +408,28 @@ def build_notify_text(trips: list, dry_run: bool) -> str:
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
+    log(f"=== import_blok_history.py СТАРТ === DRY_RUN={DRY_RUN}")
+    log(f"DATA_DIR={DATA_DIR}, CHECKPOINT={CHECKPOINT_FILE}")
+    log(f"TOKEN={'OK' if TOKEN else 'MISSING'} CLAUDE={'OK' if CLAUDE_API_KEY else 'MISSING'} SHEETS={'OK' if GOOGLE_SA_B64 else 'MISSING'}")
+
     for name, val in [("MAX_BOT_TOKEN", TOKEN), ("CLAUDE_API_KEY", CLAUDE_API_KEY), ("GOOGLE_SA_B64", GOOGLE_SA_B64)]:
         if not val:
-            print(f"ОШИБКА: {name} не задан!")
+            log(f"ОШИБКА: {name} не задан!")
             sys.exit(1)
 
     if DRY_RUN:
-        print("=== РЕЖИМ PREVIEW (dry-run) — в Sheets НЕ пишем ===\n")
+        log("=== РЕЖИМ PREVIEW (dry-run) — в Sheets НЕ пишем ===")
 
     # 1. Загружаем чекпоинт
     from_ts = load_checkpoint()
 
     # 2. Читаем новые сообщения из MAX группы
-    print(f"\nЧитаем сообщения из группы...")
+    log(f"Читаем сообщения из группы (GROUP_ID={GROUP_ID})...")
     messages = get_new_messages(from_ts)
-    print(f"Новых сообщений: {len(messages)}")
+    log(f"Новых сообщений: {len(messages)}")
 
     if not messages:
-        print("Нет новых сообщений. Выход.")
+        log("Нет новых сообщений. Выход.")
         return
 
     # 3. Фильтруем планы менеджера
@@ -419,43 +443,41 @@ def main():
         sender = msg.get("sender", {}).get("name", "?")
         plan_msgs.append({"dt": dt, "date": dt[:10], "sender": sender, "text": text, "ts": ts})
 
-    print(f"Сообщений-планов: {len(plan_msgs)}\n")
+    log(f"Сообщений-планов: {len(plan_msgs)}")
 
     # 4. Парсим каждое сообщение
     all_trips = []
     for pm in plan_msgs:
-        print(f"[{pm['dt']}] {pm['sender']}: {pm['text'][:70]}")
+        log(f"[{pm['dt']}] {pm['sender']}: {pm['text'][:70]}")
         trips = claude_parse(pm["text"], pm["date"])
         for t in trips:
             if not t.get("date"):
                 t["date"] = pm["date"]
-            print(f"  → {t}")
+            log(f"  → {t}")
         all_trips.extend(trips)
 
-    print(f"\n=== Итого рейсов: {len(all_trips)} ===")
+    log(f"=== Итого рейсов: {len(all_trips)} ===")
 
     if not all_trips:
-        # Чекпоинт всё равно обновляем чтобы не перечитывать
         last_ts = max(m.get("timestamp", 0) for m in messages)
         if not DRY_RUN:
             save_checkpoint(last_ts)
-        print("Рейсов для записи нет.")
+        log("Рейсов для записи нет.")
         return
 
     # 5. Записываем в Sheets
     if not DRY_RUN:
         gc = get_gspread()
-        print("\n--- Запись рейсов в 'Рейсы' ---")
+        log("--- Запись рейсов в 'Рейсы' ---")
         write_trips(all_trips, gc)
-        print("\n--- Обновление остатков ---")
+        log("--- Обновление остатков ---")
         update_stock(all_trips, gc)
-        # Сохраняем чекпоинт
         last_ts = max(m.get("timestamp", 0) for m in messages)
         save_checkpoint(last_ts)
     else:
-        print("\n[dry-run] Рейсы НЕ записаны в Sheets")
+        log("[dry-run] Рейсы НЕ записаны в Sheets")
 
-    print("\n✅ Готово!")
+    log("=== ГОТОВО ===")
 
 
 if __name__ == "__main__":
