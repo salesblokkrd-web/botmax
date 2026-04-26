@@ -2052,6 +2052,18 @@ def process_update_safe(update: dict):
 
 # ─── Мониторинг группы "Архиповский блок" ─────────────────────────────────
 
+def _debug_log_chat(chat_id: int, sender: str, text_preview: str):
+    """Логируем все групповые chat_id для поиска нужной группы."""
+    log_path = os.path.join(DATA_DIR, "group_chat_ids.log")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts} | chat_id={chat_id} | sender={sender} | {text_preview}\n"
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 def _log_blok_message(sender_name: str, text: str, raw: dict):
     """Пишем сырое сообщение из группы в лог-файл для анализа формата."""
     log_path = os.path.join(DATA_DIR, "blok_group_log.jsonl")
@@ -2203,6 +2215,11 @@ def process_update(update: dict):
         user_name = sender.get("name", "")
         body = msg.get("body", {})
         text = (body.get("text") or "").strip()
+
+        # Логируем все групповые сообщения для диагностики group ID
+        recipient_type = msg.get("recipient", {}).get("chat_type", "")
+        if recipient_type in ("group", "channel") or (isinstance(chat_id, int) and chat_id < 0):
+            _debug_log_chat(chat_id, user_name, text[:50] if text else "")
 
         # Сообщение из группы производства — отдельная обработка
         if chat_id == BLOK_GROUP_ID:
