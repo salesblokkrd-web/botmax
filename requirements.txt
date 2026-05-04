@@ -4,3 +4,5 @@ pydantic
 requests
 PyJWT
 cryptography
+gspread
+google-auth

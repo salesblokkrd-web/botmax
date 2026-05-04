@@ -4,6 +4,7 @@ import os
 import json
 import time
 import math
+import datetime
 import threading
 import urllib.request
 import urllib.parse
@@ -53,6 +54,12 @@ BASE_COORDS = (44.992753, 39.838747)
 BASE_NAME = "Архиповский карьер (с. Архиповское, Белореченский р-н)"
 RATE_PER_TON_KM = 5
 WORK_HOURS = "пн–сб 8:00–18:00"
+
+# ─── Группа производства "Архиповский блок" ───────────────────────────────
+BLOK_GROUP_ID = int(os.environ.get("BLOK_GROUP_ID", "-68840834804304"))  # Производство Тихорецкая
+GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")  # base64(service_account.json)
+SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
+CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 
 PRODUCTS = {
     "Отсев 0-5":             614,
@@ -2051,6 +2058,155 @@ def process_update_safe(update: dict):
             lock.release()
 
 
+# ─── Мониторинг группы "Архиповский блок" ─────────────────────────────────
+
+def _debug_log_chat(chat_id: int, sender: str, text_preview: str):
+    """Логируем все групповые chat_id для поиска нужной группы."""
+    log_path = os.path.join(DATA_DIR, "group_chat_ids.log")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts} | chat_id={chat_id} | sender={sender} | {text_preview}\n"
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+def _log_blok_message(sender_name: str, text: str, raw: dict):
+    """Пишем сырое сообщение из группы в лог-файл для анализа формата."""
+    log_path = os.path.join(DATA_DIR, "blok_group_log.jsonl")
+    entry = {
+        "ts": datetime.datetime.now().isoformat(),
+        "sender": sender_name,
+        "text": text,
+        "raw": raw,
+    }
+    with threading.Lock():
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    print(f"[BLOK_GROUP] {sender_name}: {text[:80]}", flush=True)
+
+
+_BLOCK_CATALOG = """
+КАТАЛОГ ПРОДУКЦИИ (бетонные блоки):
+
+Блок 20 (двадцатка, размер 188×190×390 мм):
+  - 3-пустотный: "20-3,0", "20/3", "двадцатка трёшка"
+  - 4-пустотный: "20-4,0", "20/4", "двадцатка четвёрка"
+  Наполнитель: отсев или керамзит
+
+Блок 12 (двенашка, 120, размер 120×190×390 мм):
+  - 2-пустотный: "12-2,0", "120-2,0", "12/2"
+
+Блок 9 (девятка, полублок, 90, размер 90×190×390 мм):
+  - 2-пустотный: "9-2,0", "90-2,0", "девятка", "полублок"
+
+Формат block_type в ответе: "Блок [размер] [наполнитель] [пустотность]"
+Примеры: "Блок 20 отсев 3,0", "Блок 9 керамзит 2,0", "Блок 12 отсев 2,0"
+Если наполнитель неизвестен: "Блок 20 3,0". Если пустотность неизвестна: "Блок 20 отсев"
+"""
+
+
+def _parse_blok_plan_claude(text: str) -> list:
+    """Парсит план менеджера через Claude API. Возвращает список рейсов."""
+    if not CLAUDE_API_KEY:
+        return []
+    prompt = f"""Ты парсер производственных заданий завода бетонных блоков.
+{_BLOCK_CATALOG}
+Из текста извлеки список рейсов. Каждый рейс — объект JSON:
+- date: дата YYYY-MM-DD (если не указана — сегодня {datetime.date.today()})
+- truck: номер или название машины
+- block_type: нормализованное название по каталогу выше
+- pallets: количество поддонов (число)
+- pallet_type: "большой" или "узкий" если указан, иначе null
+- client: название клиента/организации
+- address: адрес доставки
+- time: время доставки ("10:00")
+- warehouse: "КРД" или "Карьер" или null
+
+Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
+
+Текст задания:
+{text}"""
+
+    body = json.dumps({
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 2048,
+        "messages": [{"role": "user", "content": prompt}]
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "x-api-key": CLAUDE_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read())
+        raw_text = resp["content"][0]["text"].strip()
+        # Убираем markdown-блок если есть
+        raw_text = re.sub(r'^```[a-z]*\n?', '', raw_text)
+        raw_text = re.sub(r'\n?```$', '', raw_text)
+        return json.loads(raw_text)
+    except Exception as e:
+        print(f"[BLOK_PARSE] Ошибка: {e}", flush=True)
+        return []
+
+
+def _write_trips_to_sheets(trips: list):
+    """Записывает рейсы в лист 'Рейсы' Google Sheets через gspread."""
+    if not trips or not GOOGLE_SA_B64:
+        return
+    try:
+        import base64, tempfile
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+        ws = sh.worksheet("Рейсы")
+        for trip in trips:
+            row = [
+                trip.get("date") or str(datetime.date.today()),
+                trip.get("truck") or "",
+                trip.get("block_type") or "",
+                trip.get("pallets") or "",
+                trip.get("client") or "",
+                trip.get("address") or "",
+                trip.get("time") or "",
+            ]
+            ws.append_row(row, value_input_option="USER_ENTERED")
+            print(f"[BLOK_SHEETS] Добавлен рейс: {row}", flush=True)
+    except Exception as e:
+        print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
+
+
+def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
+    """Основная точка входа для сообщений из группы производства."""
+    _log_blok_message(sender_name, text, raw_msg)
+
+    # Ищем признаки плана менеджера (ключевые слова)
+    keywords = ("план", "блок", "поддон", "рейс", "везёт", "везет", "доставка")
+    if not any(kw in text.lower() for kw in keywords):
+        return  # Не похоже на задание — просто логируем
+
+    trips = _parse_blok_plan_claude(text)
+    if not trips:
+        print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
+        return
+
+    print(f"[BLOK_GROUP] Распарсено {len(trips)} рейс(а): {trips}", flush=True)
+    _write_trips_to_sheets(trips)
+
+
 def process_update(update: dict):
     utype = update.get("update_type")
 
@@ -2067,6 +2223,15 @@ def process_update(update: dict):
         user_name = sender.get("name", "")
         body = msg.get("body", {})
         text = (body.get("text") or "").strip()
+
+        # Логируем ВСЕ входящие сообщения для диагностики
+        _debug_log_chat(chat_id, user_name, text[:80] if text else f"[no text, update_type={utype}]")
+
+        # Сообщение из группы производства — отдельная обработка
+        if chat_id == BLOK_GROUP_ID:
+            if text:
+                handle_blok_group_message(user_name, text, msg)
+            return  # не пускаем в основную логику бота
 
         # Голосовое / аудио
         VOICE_TYPES = ("audio", "voice", "audio_msg", "audio_message", "voice_message")
@@ -2212,6 +2377,77 @@ def build_weekly_report() -> str:
     )
 
 
+def _reset_checkpoint_if_needed():
+    """Сбрасывает чекпоинт если GROUP_ID изменился."""
+    checkpoint_path = os.path.join(DATA_DIR, "blok_checkpoint.json")
+    try:
+        with open(checkpoint_path) as f:
+            data = json.load(f)
+        saved_group = data.get("group_id")
+        if saved_group and saved_group != BLOK_GROUP_ID:
+            print(f"[BLOK_SYNC] GROUP_ID изменился ({saved_group} → {BLOK_GROUP_ID}), сброс чекпоинта", flush=True)
+            with open(checkpoint_path, "w") as f:
+                json.dump({"last_ts_ms": 0, "last_dt": "reset", "group_id": BLOK_GROUP_ID}, f)
+        elif not saved_group:
+            # Дописываем group_id в существующий чекпоинт
+            data["group_id"] = BLOK_GROUP_ID
+            # Если ts из старой группы — тоже сбрасываем
+            old_ts = data.get("last_ts_ms", 0)
+            if old_ts > 0:
+                print(f"[BLOK_SYNC] Сброс чекпоинта (старая группа без group_id)", flush=True)
+                data["last_ts_ms"] = 0
+                data["last_dt"] = "reset"
+            with open(checkpoint_path, "w") as f:
+                json.dump(data, f)
+    except FileNotFoundError:
+        pass
+
+
+def _run_blok_import():
+    """Запускает import_blok_history.py как подпроцесс."""
+    import subprocess
+    import sys as _sys
+    script = os.path.join(os.path.dirname(os.path.abspath(_sys.argv[0])), "import_blok_history.py")
+    print(f"[BLOK_SYNC] Запуск: {script}", flush=True)
+    result = subprocess.run(
+        [_sys.executable, script],
+        capture_output=True, text=True, encoding="utf-8", timeout=180
+    )
+    print(f"[BLOK_SYNC] Завершён (rc={result.returncode})", flush=True)
+    if result.stdout:
+        print(result.stdout[-800:], flush=True)
+    if result.stderr:
+        print(f"[BLOK_SYNC_ERR] {result.stderr[-300:]}", flush=True)
+
+
+def blok_sync_loop():
+    """Фоновый тред: сразу при старте + каждые 4 часа (8, 12, 16, 20 МСК)."""
+    last_run_key = None
+    RUN_HOURS = {8, 12, 16, 20}
+
+    # Первый запуск — через 2 минуты после старта бота (дать время инициализироваться)
+    print("[BLOK_SYNC] Первый запуск через 2 минуты...", flush=True)
+    time.sleep(120)
+    try:
+        _run_blok_import()
+        last_run_key = ("startup",)
+    except Exception as e:
+        print(f"[BLOK_SYNC] Ошибка при старте: {e}", flush=True)
+
+    while True:
+        try:
+            time.sleep(600)  # проверяем каждые 10 минут
+            now_msk = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+            hour = now_msk.hour
+            run_key = (now_msk.date(), hour)
+            if hour in RUN_HOURS and last_run_key != run_key:
+                last_run_key = run_key
+                print(f"[BLOK_SYNC] Плановый запуск {now_msk.strftime('%Y-%m-%d %H:%M')}", flush=True)
+                _run_blok_import()
+        except Exception as e:
+            print(f"[BLOK_SYNC] Ошибка: {e}", flush=True)
+
+
 def weekly_report_loop():
     """Фоновый тред: отправляет отчёт владельцу по воскресеньям в 20:00 МСК."""
     import datetime
@@ -2274,6 +2510,30 @@ def main():
     report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
     report_thread.start()
     print("[STARTUP] Еженедельный отчёт: воскресенье 20:00 МСК", flush=True)
+
+    # Сбрасываем чекпоинт если GROUP_ID изменился
+    _reset_checkpoint_if_needed()
+
+    # Запускаем фоновый тред синхронизации группы Архиповский блок
+    if CLAUDE_API_KEY and GOOGLE_SA_B64:
+        sync_thread = threading.Thread(target=blok_sync_loop, daemon=True)
+        sync_thread.start()
+        print("[STARTUP] Blok sync: каждые 4 часа (8, 12, 16, 20 МСК)", flush=True)
+    else:
+        print("[STARTUP] Blok sync ОТКЛЮЧЁН (нет CLAUDE_API_KEY или GOOGLE_SA_B64)", flush=True)
+
+    # Диагностика: пишем info о боте и его чатах в файл
+    try:
+        me = _api("GET", "me")
+        chats_resp = _api("GET", "chats", params={"count": 50})
+        diag_path = os.path.join(DATA_DIR, "bot_diag.json")
+        with open(diag_path, "w", encoding="utf-8") as f:
+            json.dump({"me": me, "chats": chats_resp}, f, ensure_ascii=False, indent=2)
+        print(f"[STARTUP] Bot name: {me.get('name')} @{me.get('username')}", flush=True)
+        for c in chats_resp.get("chats", []):
+            print(f"[STARTUP] Chat: id={c.get('chat_id')} type={c.get('type')} title={c.get('title')}", flush=True)
+    except Exception as e:
+        print(f"[STARTUP] Диагностика ошибка: {e}", flush=True)
 
     marker = None
     with ThreadPoolExecutor(max_workers=6) as pool:
