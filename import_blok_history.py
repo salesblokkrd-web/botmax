@@ -94,10 +94,12 @@ def save_checkpoint(last_ts_ms: int):
 # ─── MAX API ────────────────────────────────────────────────────────────────
 
 def max_get(path: str, params: dict = None) -> dict:
-    url = f"{MAX_API}{path}?access_token={TOKEN}"
+    url = f"{MAX_API}{path}"
     if params:
-        url += "&" + urllib.parse.urlencode(params)
+        url += "?" + urllib.parse.urlencode(params)
+
     req = urllib.request.Request(url)
+    req.add_header("Authorization", f"Bearer {TOKEN}")
     with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
         return json.loads(r.read())
 

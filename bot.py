@@ -398,10 +398,10 @@ BASE_URL = "https://botapi.max.ru"
 
 def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> dict:
     p = dict(params or {})
-    p["access_token"] = TOKEN
-    url = f"{BASE_URL}/{endpoint}?{urllib.parse.urlencode(p)}"
+    url = f"{BASE_URL}/{endpoint}?{urllib.parse.urlencode(p)}" if p else f"{BASE_URL}/{endpoint}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {TOKEN}")
     if data:
         req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", "quarry-max-bot/1.0")
@@ -414,6 +414,24 @@ def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> 
     except Exception as e:
         print(f"[API] {method} /{endpoint} error: {e}", flush=True)
         return {}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def send_msg(chat_id: int, text: str, buttons=None) -> dict:
