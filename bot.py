@@ -17,14 +17,6 @@ from groq import Groq
 from pydantic import BaseModel
 from typing import Optional, List
 
-# ─── Модуль отслеживания рейсов (блоки → Google Sheets) ─────────────────────
-from trip_parser import parse_trip_message, format_trip_row, format_trip_confirmation
-from sheets_logger import append_trip, get_last_trip_number, test_connection as sheets_test
-
-# ID группы "Производство и отгрузка" (определяется автоматически или задаётся вручную)
-PRODUCTION_CHAT_ID = int(os.environ.get("PRODUCTION_CHAT_ID", "0"))
-PRODUCTION_CHAT_NAMES = ["производств", "отгрузк", "блок"]
-
 # ─── Конфиг ───────────────────────────────────────────────────────────────
 
 TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
@@ -2266,33 +2258,8 @@ def process_update(update: dict):
                 send_msg(chat_id, "Я понимаю текст и голосовые сообщения. Напишите или наговорите что вам нужно 🙂")
                 return
 
+
         if text:
-            # --- Проверка: сообщение из группы "Производство и отгрузка" ---
-            is_production_group = False
-            chat_title = msg.get("recipient", {}).get("chat_title", "").lower()
-            if PRODUCTION_CHAT_ID and chat_id == PRODUCTION_CHAT_ID:
-                is_production_group = True
-            elif chat_title and any(m in chat_title for m in PRODUCTION_CHAT_NAMES):
-                is_production_group = True
-                if not PRODUCTION_CHAT_ID:
-                    print(f"[TRIPS] Обнаружена группа производства: chat_id={chat_id} title={chat_title}", flush=True)
-
-            if is_production_group:
-                trip = parse_trip_message(text)
-                if trip:
-                    try:
-                        num = get_last_trip_number() + 1
-                        row = format_trip_row(trip, num)
-                        ok = append_trip(row)
-                        if ok:
-                            confirm = format_trip_confirmation(trip)
-                            send_msg(chat_id, confirm)
-                        else:
-                            print(f"[TRIPS] Не удалось записать рейс: {row}", flush=True)
-                    except Exception as e:
-                        print(f"[TRIPS] Ошибка записи рейса: {e}", flush=True)
-                    return  # не передаём в handle_message
-
             handle_message(chat_id, text, user_name, user_id=user_id)
 
     elif utype == "message_callback":
