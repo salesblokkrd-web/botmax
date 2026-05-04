@@ -2123,20 +2123,32 @@ def _parse_blok_plan_claude(text: str) -> list:
         return []
     prompt = f"""Ты парсер производственных заданий завода бетонных блоков.
 {_BLOCK_CATALOG}
-Из текста извлеки список рейсов. Каждый рейс — объект JSON:
-- date: дата YYYY-MM-DD (если не указана — сегодня {datetime.date.today()})
-- truck: номер или название машины
-- block_type: нормализованное название по каталогу выше
-- pallets: количество поддонов (число)
-- pallet_type: "большой" или "узкий" если указан, иначе null
+
+ВОДИТЕЛИ И МАШИНЫ:
+- Кораблев М.Н. — у135рх 193
+- Адлейба А.Ю. — р319ок 123
+- Кислицин А.С. — р638хн 123
+- Камышанов А.А.
+
+Из текста извлеки ВСЕ события. Каждое событие — объект JSON:
+- type: "trip" (рейс/доставка), "return" (возврат поддонов), "price" (изменение цены)
+- date: дата ДД.ММ.ГГГГ (если не указана — сегодня {datetime.date.today().strftime('%d.%m.%Y')})
+- driver: ФИО водителя (из списка выше, по фамилии)
+- truck: гос.номер машины (из списка выше)
+- from_location: откуда ("Карьер", "КРД", название города)
+- to_location: куда ("КРД", "Карьер", название города/объекта)
 - client: название клиента/организации
-- address: адрес доставки
-- time: время доставки ("10:00")
-- warehouse: "КРД" или "Карьер" или null
+- product: кодировка блока: "20(3-0)", "20(4-0)", "9(2-0)", "12(2-0)" или комбинация через "+"
+- pallets: количество поддонов (число)
+- pallet_type: "стандартный 1.0x1.2" или "узкий 0.8x1.2" или null
+- return_pallets: количество возвратных поддонов (для type=return)
+- price_product: название продукта (для type=price)
+- price_old: старая цена (для type=price)
+- price_new: новая цена (для type=price)
 
 Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
 
-Текст задания:
+Текст:
 {text}"""
 
     body = json.dumps({
@@ -2183,18 +2195,58 @@ def _write_trips_to_sheets(trips: list):
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(SHEETS_ID)
         ws = sh.worksheet("Рейсы")
+        # Получаем последний номер записи
+        all_vals = ws.col_values(1)
+        last_num = 0
+        for v in all_vals:
+            if v.isdigit():
+                last_num = max(last_num, int(v))
+
         for trip in trips:
-            row = [
-                trip.get("date") or str(datetime.date.today()),
-                trip.get("truck") or "",
-                trip.get("block_type") or "",
-                trip.get("pallets") or "",
-                trip.get("client") or "",
-                trip.get("address") or "",
-                trip.get("time") or "",
-            ]
+            evt_type = trip.get("type", "trip")
+            last_num += 1
+
+            if evt_type == "price":
+                # Изменение цены — записываем как комментарий
+                price_info = f"ЦЕНА: {trip.get('price_product','')} {trip.get('price_old','')}→{trip.get('price_new','')}"
+                row = [
+                    str(last_num),
+                    trip.get("date") or datetime.date.today().strftime("%d.%m.%Y"),
+                    "", "", "", "", "",
+                    price_info,
+                ]
+            elif evt_type == "return":
+                # Возврат поддонов
+                ret_info = f"ВОЗВРАТ поддонов: {trip.get('return_pallets','')} шт"
+                if trip.get("pallet_type"):
+                    ret_info += f" ({trip.get('pallet_type')})"
+                row = [
+                    str(last_num),
+                    trip.get("date") or datetime.date.today().strftime("%d.%m.%Y"),
+                    trip.get("truck") or "",
+                    trip.get("driver") or "",
+                    trip.get("from_location") or "",
+                    trip.get("to_location") or "",
+                    trip.get("client") or "",
+                    ret_info,
+                ]
+            else:
+                # Рейс — стандартный формат таблицы
+                product = trip.get("product") or trip.get("block_type") or ""
+                if trip.get("pallets"):
+                    product += f" ({trip.get('pallets')} подд.)"
+                row = [
+                    str(last_num),
+                    trip.get("date") or datetime.date.today().strftime("%d.%m.%Y"),
+                    trip.get("truck") or "",
+                    trip.get("driver") or "",
+                    trip.get("from_location") or "",
+                    trip.get("to_location") or "",
+                    trip.get("client") or "",
+                    product,
+                ]
             ws.append_row(row, value_input_option="USER_ENTERED")
-            print(f"[BLOK_SHEETS] Добавлен рейс: {row}", flush=True)
+            print(f"[BLOK_SHEETS] Добавлен {evt_type}: {row}", flush=True)
     except Exception as e:
         print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
 
@@ -2204,7 +2256,13 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     _log_blok_message(sender_name, text, raw_msg)
 
     # Ищем признаки плана менеджера (ключевые слова)
-    keywords = ("план", "блок", "поддон", "рейс", "везёт", "везет", "доставка")
+    keywords = (
+        "план", "блок", "поддон", "рейс", "везёт", "везет", "доставка",
+        "возврат", "вернул", "забрал", "привёз", "привез", "отгруз", "загруз", "выгруз",
+        "цена", "цены", "прайс", "стоимость", "подорож", "удешев",
+        "двадцат", "девят", "двенаш", "полублок", "керамзит", "отсев",
+        "20-", "9-", "12-", "20(", "9(", "12(",
+    )
     if not any(kw in text.lower() for kw in keywords):
         return  # Не похоже на задание — просто логируем
 
