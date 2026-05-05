@@ -17,6 +17,12 @@ from groq import Groq
 from pydantic import BaseModel
 from typing import Optional, List
 
+try:
+    import pallet_handler
+except ImportError:
+    pallet_handler = None
+    print("[INIT] pallet_handler not available", flush=True)
+
 # ─── Конфиг ───────────────────────────────────────────────────────────────
 
 TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
@@ -2255,6 +2261,14 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     """Основная точка входа для сообщений из группы производства."""
     _log_blok_message(sender_name, text, raw_msg)
 
+
+    # Проверяем структурированные сообщения (#поддоны, #условия)
+    if pallet_handler:
+        pallet_result = pallet_handler.try_handle(text, sender_name)
+        if pallet_result:
+            print(f"[PALLET] {pallet_result}", flush=True)
+            send_msg(BLOK_GROUP_ID, pallet_result)
+            return
     # Ищем признаки плана менеджера (ключевые слова)
     keywords = (
         "план", "блок", "поддон", "рейс", "везёт", "везет", "доставка",
