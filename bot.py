@@ -2734,6 +2734,24 @@ def main():
     except Exception as e:
         print(f"[STARTUP] Диагностика ошибка: {e}", flush=True)
 
+    # DEBUG: отправляем стартовое сообщение владельцу
+    try:
+        diag_text = (
+            f"[STARTUP DIAG]\n"
+            f"MAX_BOT_TOKEN: ...{TOKEN[-4:] if TOKEN else 'EMPTY'}\n"
+            f"CLAUDE_API_KEY: ...{CLAUDE_API_KEY[-4:] if CLAUDE_API_KEY else 'EMPTY'}\n"
+            f"BLOK_GROUP_ID: {BLOK_GROUP_ID}\n"
+            f"OWNER_CHAT_ID: {OWNER_CHAT_ID}\n"
+            f"GOOGLE_SA_B64: {'SET' if GOOGLE_SA_B64 else 'EMPTY'}"
+        )
+        if OWNER_CHAT_ID:
+            send_msg(OWNER_CHAT_ID, diag_text)
+            print(f"[STARTUP] Sent diag to owner", flush=True)
+        # Also send to group as proof of life
+        send_msg(BLOK_GROUP_ID, "[BOT] Учётчик перезапущен и готов к работе")
+    except Exception as e:
+        print(f"[STARTUP] Diag send error: {e}", flush=True)
+
     marker = None
     with ThreadPoolExecutor(max_workers=6) as pool:
         while True:
