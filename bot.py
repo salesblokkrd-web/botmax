@@ -2308,8 +2308,10 @@ def _confirm_accounting_events(events: list, sender_name: str):
         send_msg(BLOK_GROUP_ID, text)
         print(f'[ACCOUNTING] Подтверждение: {text}', flush=True)
 
-        # Записываем в Sheets (лист "Бухгалтерия")
-        _write_accounting_to_sheets(events)
+        # Записываем в Sheets (лист "Бухгалтерия") — только бухгалтерские, НЕ рейсы
+        acct_only = [e for e in events if e.get('type') not in ('trip', 'return')]
+        if acct_only:
+            _write_accounting_to_sheets(acct_only)
 
 
 def _write_accounting_to_sheets(events: list):
@@ -2391,16 +2393,14 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
 
     print(f"[BLOK_GROUP] Распарсено {len(trips)} событий: {trips}", flush=True)
 
-    # Разделяем: рейсы → в Sheets, бухгалтерские команды → подтверждение в чат
+    # Рейсы/возвраты/цены → в Sheets
     sheet_events = [t for t in trips if t.get('type') in ('trip', 'return', 'price')]
-    accounting_events = [t for t in trips if t.get('type') not in ('trip', 'return', 'price')]
-
     if sheet_events:
         _write_trips_to_sheets(sheet_events)
 
-    # Подтверждение бухгалтерских команд
-    if accounting_events:
-        _confirm_accounting_events(accounting_events, sender_name)
+    # ВСЕ события → подтверждение в чат (включая price)
+    if trips:
+        _confirm_accounting_events(trips, sender_name)
 
 
 def process_update(update: dict):
