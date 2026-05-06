@@ -404,10 +404,10 @@ BASE_URL = "https://botapi.max.ru"
 
 def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> dict:
     p = dict(params or {})
-    url = f"{BASE_URL}/{endpoint}?{urllib.parse.urlencode(p)}" if p else f"{BASE_URL}/{endpoint}"
+    p["access_token"] = TOKEN  # MAX API требует токен в query string
+    url = f"{BASE_URL}/{endpoint}?{urllib.parse.urlencode(p)}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {TOKEN}")
     if data:
         req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", "quarry-max-bot/1.0")
@@ -2070,11 +2070,7 @@ def process_update_safe(update: dict):
         import traceback
         err_text = f"[ERROR] {e}\n{traceback.format_exc()[:300]}"
         print(err_text, flush=True)
-        # DEBUG: отправляем ошибку в группу для диагностики
-        try:
-            _api("POST", "messages", params={"chat_id": BLOK_GROUP_ID}, body={"text": f"[BOT ERROR] {str(e)[:200]}"})
-        except Exception:
-            pass
+
     finally:
         if lock:
             lock.release()
@@ -2385,20 +2381,6 @@ def _write_accounting_to_sheets(events: list):
 
 def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     """Основная точка входа для сообщений из группы производства."""
-    try:
-        _handle_blok_group_inner(sender_name, text, raw_msg)
-    except Exception as e:
-        import traceback
-        err = f"[BOT CRASH] handle_blok: {e}\n{traceback.format_exc()[:200]}"
-        print(err, flush=True)
-        try:
-            _api("POST", "messages", params={"chat_id": BLOK_GROUP_ID}, body={"text": err[:500]})
-        except Exception:
-            pass
-
-
-def _handle_blok_group_inner(sender_name: str, text: str, raw_msg: dict):
-    """Внутренняя обработка сообщений группы."""
     _log_blok_message(sender_name, text, raw_msg)
 
 
@@ -2423,12 +2405,6 @@ def _handle_blok_group_inner(sender_name: str, text: str, raw_msg: dict):
     if not any(kw in text.lower() for kw in keywords):
         return  # Не похоже на задание — просто логируем
 
-    # DEBUG: отправляем эхо что сообщение принято к обработке
-    try:
-        send_msg(BLOK_GROUP_ID, f"[DEBUG] Обрабатываю от {sender_name}: {text[:50]}...")
-    except Exception as dbg_err:
-        print(f"[DEBUG] Ошибка отправки эхо: {dbg_err}", flush=True)
-
     trips = _parse_blok_plan_claude(text)
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
@@ -2448,9 +2424,6 @@ def _handle_blok_group_inner(sender_name: str, text: str, raw_msg: dict):
 
 def process_update(update: dict):
     utype = update.get("update_type")
-    # DEBUG: raw update type
-    print(f"[RAW_UPDATE] type={utype} keys={list(update.keys())[:5]}", flush=True)
-
     if utype == "message_created":
         msg = update.get("message", {})
         sender = msg.get("sender", {})
@@ -2467,9 +2440,6 @@ def process_update(update: dict):
 
         # Логируем ВСЕ входящие сообщения для диагностики
         _debug_log_chat(chat_id, user_name, text[:80] if text else f"[no text, update_type={utype}]")
-
-        # DEBUG: логируем chat_id и тип для диагностики
-        print(f"[DIAG] chat_id={chat_id} type={type(chat_id).__name__} BLOK={BLOK_GROUP_ID} type={type(BLOK_GROUP_ID).__name__} match={chat_id == BLOK_GROUP_ID} sender={user_name} text={text[:40]}", flush=True)
 
         # Сообщение из группы производства — отдельная обработка
         if chat_id == BLOK_GROUP_ID:
@@ -2754,13 +2724,12 @@ def main():
     except Exception as e:
         print(f"[STARTUP] Диагностика ошибка: {e}", flush=True)
 
-    # Proof of life — отправляем в группу напрямую через _api
+    # Proof of life
     try:
-        _api("POST", "messages", params={"chat_id": BLOK_GROUP_ID},
-             body={"text": f"[BOT] Учётчик v{int(time.time()) % 10000} запущен. BLOK={BLOK_GROUP_ID}"})
-        print("[STARTUP] Proof of life sent to group", flush=True)
+        send_msg(BLOK_GROUP_ID, "Учётчик перезапущен и готов к работе")
+        print("[STARTUP] Proof of life sent", flush=True)
     except Exception as e:
-        print(f"[STARTUP] Proof of life FAILED: {e}", flush=True)
+        print(f"[STARTUP] Proof of life error: {e}", flush=True)
 
     marker = None
     with ThreadPoolExecutor(max_workers=6) as pool:
