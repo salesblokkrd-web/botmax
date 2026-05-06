@@ -2442,6 +2442,11 @@ def process_update(update: dict):
         user_name = sender.get("name", "")
         body = msg.get("body", {})
         text = (body.get("text") or "").strip()
+        # MAX: пересланные сообщения — текст в link.message.text
+        if not text:
+            link = msg.get("link", {})
+            if link.get("type") == "forward":
+                text = (link.get("message", {}).get("text") or "").strip()
 
         # Логируем ВСЕ входящие сообщения для диагностики
         _debug_log_chat(chat_id, user_name, text[:80] if text else f"[no text, update_type={utype}]")
