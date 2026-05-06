@@ -2403,6 +2403,12 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     if not any(kw in text.lower() for kw in keywords):
         return  # Не похоже на задание — просто логируем
 
+    # DEBUG: отправляем эхо что сообщение принято к обработке
+    try:
+        send_msg(BLOK_GROUP_ID, f"[DEBUG] Обрабатываю от {sender_name}: {text[:50]}...")
+    except Exception as dbg_err:
+        print(f"[DEBUG] Ошибка отправки эхо: {dbg_err}", flush=True)
+
     trips = _parse_blok_plan_claude(text)
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
