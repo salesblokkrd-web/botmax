@@ -2070,7 +2070,12 @@ def process_update_safe(update: dict):
         import traceback
         err_text = f"[ERROR] {e}\n{traceback.format_exc()[:300]}"
         print(err_text, flush=True)
-
+        # Отправляем ошибку owner'у чтобы не терять диагностику
+        if OWNER_CHAT_ID:
+            try:
+                send_msg(OWNER_CHAT_ID, f"⚠️ Ошибка обработки:\n{err_text[:500]}")
+            except:
+                pass
     finally:
         if lock:
             lock.release()
@@ -2678,6 +2683,45 @@ def _format_price_list():
     return "\n".join(lines)
 
 
+
+def _run_self_test():
+    """Selftest при старте: парсим тестовое сообщение через Claude, отправляем результат owner."""
+    test_text = "Надо изменить цену у ТЕСТ-КЛИЕНТ на Блок 390х190х188 с 01.01.2026 на 99,99 руб"
+    print(f"[SELFTEST] Тестируем парсинг: {test_text}", flush=True)
+    
+    events = _parse_blok_plan_claude(test_text)
+    if not events:
+        report = "❌ SELFTEST FAIL: Claude вернул пустой список"
+        print(f"[SELFTEST] {report}", flush=True)
+        if OWNER_CHAT_ID:
+            send_msg(OWNER_CHAT_ID, report)
+        return
+    
+    # Построим подтверждение как в реальной обработке
+    lines = []
+    for evt in events:
+        etype = evt.get('type', '')
+        client = evt.get('client', '—')
+        if etype == 'price':
+            product = evt.get('price_product', '—')
+            new_price = evt.get('price_new', '—')
+            date_from = evt.get('price_date_from', '')
+            date_str = f' с {date_from}' if date_from else ''
+            lines.append(f'💰 Цена: {client} → {product} = {new_price} руб.{date_str}')
+        elif etype == 'object_add':
+            obj = evt.get('object_name', '—')
+            lines.append(f'🏗 Объект: «{obj}» для {client}')
+        elif etype == 'client_add':
+            lines.append(f'👤 Клиент: {client}')
+        else:
+            lines.append(f'📋 {etype}: {client}')
+    
+    report = f"✅ SELFTEST OK: {len(events)} событий\n" + "\n".join(lines)
+    print(f"[SELFTEST] {report}", flush=True)
+    if OWNER_CHAT_ID:
+        send_msg(OWNER_CHAT_ID, f"🔧 {report}")
+
+
 def main():
     print("[STARTUP] Запуск...", flush=True)
     time.sleep(3)  # minimal delay for clean restart
@@ -2730,6 +2774,17 @@ def main():
         print("[STARTUP] Proof of life sent", flush=True)
     except Exception as e:
         print(f"[STARTUP] Proof of life error: {e}", flush=True)
+
+    # Self-test: полная цепочка парсинга
+    try:
+        _run_self_test()
+    except Exception as e:
+        print(f"[SELFTEST] Критическая ошибка: {e}", flush=True)
+        if OWNER_CHAT_ID:
+            try:
+                send_msg(OWNER_CHAT_ID, f"❌ SELFTEST CRASH: {e}")
+            except:
+                pass
 
     marker = None
     with ThreadPoolExecutor(max_workers=6) as pool:
