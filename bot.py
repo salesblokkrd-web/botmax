@@ -2137,7 +2137,9 @@ def _parse_blok_plan_claude(text: str) -> list:
 - Камышанов А.А.
 
 Из текста извлеки ВСЕ события. Каждое событие — объект JSON:
-- type: "trip" (рейс/доставка), "return" (возврат поддонов), "price" (изменение цены)
+- type: "trip" (рейс/доставка), "return" (возврат поддонов), "price" (изменение цены),
+        "client_add" (новый клиент), "client_edit" (изменение данных клиента),
+        "object_add" (добавить объект клиенту), "payment_info" (информация об оплате)
 - date: дата ДД.ММ.ГГГГ (если не указана — сегодня {datetime.date.today().strftime('%d.%m.%Y')})
 - driver: ФИО водителя (из списка выше, по фамилии)
 - truck: гос.номер машины (из списка выше)
@@ -2151,6 +2153,20 @@ def _parse_blok_plan_claude(text: str) -> list:
 - price_product: название продукта (для type=price)
 - price_old: старая цена (для type=price)
 - price_new: новая цена (для type=price)
+- price_date_from: дата начала действия цены (для type=price), формат ДД.ММ.ГГГГ
+- object_name: название объекта (для type=object_add), напр. "Литер 7"
+- payment_type: тип оплаты "нал" или "безнал" (для type=payment_info)
+- comment: доп. информация, которая не вписывается в другие поля
+
+ПРИМЕРЫ сообщений бухгалтера:
+"Надо изменить цену у МеликсетянТ на Блок 390х190х188 /3 с дост. с 24.04.26г. на 61,00 руб"
+→ [{"type":"price","client":"МеликсетянТ","price_product":"Блок 390х190х188 /3 с дост.","price_new":61.0,"price_date_from":"24.04.2026"}]
+
+"Надо добавить в КонтинентИнвест в Объекты Литер 7 и Литер 11"
+→ [{"type":"object_add","client":"КонтинентИнвест","object_name":"Литер 7"},{"type":"object_add","client":"КонтинентИнвест","object_name":"Литер 11"}]
+
+"Клиент: ИП Горячкина  Оплата: нал"
+→ [{"type":"client_add","client":"ИП Горячкина","payment_type":"нал"}]
 
 Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
 
@@ -2257,6 +2273,91 @@ def _write_trips_to_sheets(trips: list):
         print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
 
 
+def _confirm_accounting_events(events: list, sender_name: str):
+    """Отправляет подтверждение по бухгалтерским командам в группу."""
+    lines = []
+    for evt in events:
+        etype = evt.get('type', '')
+        client = evt.get('client', '—')
+        if etype == 'price':
+            product = evt.get('price_product', '—')
+            new_price = evt.get('price_new', '—')
+            date_from = evt.get('price_date_from', '')
+            date_str = f' с {date_from}' if date_from else ''
+            lines.append(f'💰 Цена: {client} → {product} = {new_price} руб.{date_str}')
+        elif etype == 'object_add':
+            obj = evt.get('object_name', '—')
+            lines.append(f'🏗 Объект: добавить «{obj}» для {client}')
+        elif etype == 'client_add':
+            pay = evt.get('payment_type', '')
+            pay_str = f' (оплата: {pay})' if pay else ''
+            lines.append(f'👤 Новый клиент: {client}{pay_str}')
+        elif etype == 'client_edit':
+            comment = evt.get('comment', '—')
+            lines.append(f'✏️ Изменение: {client} — {comment}')
+        elif etype == 'payment_info':
+            pay = evt.get('payment_type', '—')
+            lines.append(f'💳 Оплата: {client} — {pay}')
+        else:
+            comment = evt.get('comment', '')
+            lines.append(f'📋 {etype}: {client} {comment}')
+
+    if lines:
+        header = f'✅ Принято от {sender_name}:'
+        text = header + '\n' + '\n'.join(lines)
+        send_msg(BLOK_GROUP_ID, text)
+        print(f'[ACCOUNTING] Подтверждение: {text}', flush=True)
+
+        # Записываем в Sheets (лист "Бухгалтерия")
+        _write_accounting_to_sheets(events)
+
+
+def _write_accounting_to_sheets(events: list):
+    """Записывает бухгалтерские команды в лист Бухгалтерия Google Sheets."""
+    if not events or not GOOGLE_SA_B64:
+        return
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+        try:
+            ws = sh.worksheet('Бухгалтерия')
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title='Бухгалтерия', rows=1000, cols=8)
+            ws.append_row(['№', 'Дата', 'Тип', 'Клиент', 'Продукт', 'Цена', 'Объект', 'Комментарий'], value_input_option='USER_ENTERED')
+
+        all_vals = ws.col_values(1)
+        last_num = 0
+        for v in all_vals:
+            if v.isdigit():
+                last_num = max(last_num, int(v))
+
+        for evt in events:
+            last_num += 1
+            row = [
+                str(last_num),
+                evt.get('date') or datetime.date.today().strftime('%d.%m.%Y'),
+                evt.get('type', ''),
+                evt.get('client', ''),
+                evt.get('price_product', ''),
+                str(evt.get('price_new', '')) if evt.get('price_new') else '',
+                evt.get('object_name', ''),
+                evt.get('comment', ''),
+            ]
+            ws.append_row(row, value_input_option='USER_ENTERED')
+            print(f'[ACCOUNTING_SHEETS] Добавлено: {row}', flush=True)
+    except Exception as e:
+        print(f'[ACCOUNTING_SHEETS] Ошибка: {e}', flush=True)
+
+
 def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     """Основная точка входа для сообщений из группы производства."""
     _log_blok_message(sender_name, text, raw_msg)
@@ -2273,9 +2374,12 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     keywords = (
         "план", "блок", "поддон", "рейс", "везёт", "везет", "доставка",
         "возврат", "вернул", "забрал", "привёз", "привез", "отгруз", "загруз", "выгруз",
-        "цена", "цены", "прайс", "стоимость", "подорож", "удешев",
+        "цен", "прайс", "стоимост", "подорож", "удешев",
         "двадцат", "девят", "двенаш", "полублок", "керамзит", "отсев",
         "20-", "9-", "12-", "20(", "9(", "12(",
+        # Бухгалтерские команды (Светлана)
+        "надо", "необходимо", "изменить", "добавить", "удалить", "клиент", "оплат",
+        "объект", "литер", "390х", "188", "нал ", "безнал",
     )
     if not any(kw in text.lower() for kw in keywords):
         return  # Не похоже на задание — просто логируем
@@ -2285,8 +2389,18 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
         return
 
-    print(f"[BLOK_GROUP] Распарсено {len(trips)} рейс(а): {trips}", flush=True)
-    _write_trips_to_sheets(trips)
+    print(f"[BLOK_GROUP] Распарсено {len(trips)} событий: {trips}", flush=True)
+
+    # Разделяем: рейсы → в Sheets, бухгалтерские команды → подтверждение в чат
+    sheet_events = [t for t in trips if t.get('type') in ('trip', 'return', 'price')]
+    accounting_events = [t for t in trips if t.get('type') not in ('trip', 'return', 'price')]
+
+    if sheet_events:
+        _write_trips_to_sheets(sheet_events)
+
+    # Подтверждение бухгалтерских команд
+    if accounting_events:
+        _confirm_accounting_events(accounting_events, sender_name)
 
 
 def process_update(update: dict):
