@@ -2194,7 +2194,24 @@ def _parse_blok_plan_claude(text: str) -> list:
         # Убираем markdown-блок если есть
         raw_text = re.sub(r'^```[a-z]*\n?', '', raw_text)
         raw_text = re.sub(r'\n?```$', '', raw_text)
-        return json.loads(raw_text)
+        events = json.loads(raw_text)
+        # Нормализация полей (Claude иногда возвращает альтернативные имена)
+        for evt in events:
+            if 'new_price' in evt and 'price_new' not in evt:
+                evt['price_new'] = evt.pop('new_price')
+            if 'old_price' in evt and 'price_old' not in evt:
+                evt['price_old'] = evt.pop('old_price')
+            if 'object' in evt and 'price_product' not in evt and evt.get('type') == 'price':
+                evt['price_product'] = evt.pop('object')
+            if 'product' in evt and 'price_product' not in evt and evt.get('type') == 'price':
+                evt['price_product'] = evt.pop('product')
+            if 'effective_date' in evt and 'price_date_from' not in evt:
+                evt['price_date_from'] = evt.pop('effective_date')
+            if 'date_from' in evt and 'price_date_from' not in evt:
+                evt['price_date_from'] = evt.pop('date_from')
+            if 'name' in evt and 'object_name' not in evt and evt.get('type') == 'object_add':
+                evt['object_name'] = evt.pop('name')
+        return events
     except Exception as e:
         print(f"[BLOK_PARSE] Ошибка: {e}", flush=True)
         return []
