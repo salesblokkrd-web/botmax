@@ -2453,8 +2453,19 @@ def process_update(update: dict):
 
         # Сообщение из группы производства — отдельная обработка
         if chat_id == BLOK_GROUP_ID:
+            print(f"[BLOK_MSG] from={user_name} text={text[:80]!r} has_text={bool(text)}", flush=True)
             if text:
-                handle_blok_group_message(user_name, text, msg)
+                try:
+                    handle_blok_group_message(user_name, text, msg)
+                except Exception as e:
+                    import traceback
+                    err = f"[BLOK_ERROR] {e}\n{traceback.format_exc()[:400]}"
+                    print(err, flush=True)
+                    if OWNER_CHAT_ID:
+                        try:
+                            send_msg(OWNER_CHAT_ID, f"⚠️ Ошибка блок-обработки:\n{err[:500]}")
+                        except:
+                            pass
             return  # не пускаем в основную логику бота
 
         # Голосовое / аудио
@@ -2801,6 +2812,13 @@ def main():
                     marker = resp["marker"]
 
                 for upd in updates:
+                    # Диагностика: логируем каждый update
+                    _ut = upd.get("update_type", "?")
+                    _msg = upd.get("message", {})
+                    _sn = _msg.get("sender", {}).get("name", "?")
+                    _cid = _msg.get("recipient", {}).get("chat_id", "?")
+                    _txt = (_msg.get("body", {}).get("text") or "")[:50]
+                    print(f"[POLL] {_ut} chat={_cid} from={_sn}: {_txt!r}", flush=True)
                     pool.submit(process_update_safe, upd)
 
             except KeyboardInterrupt:
