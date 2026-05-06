@@ -376,9 +376,8 @@ def _find_col(header: list, keywords: list) -> int | None:
 # ─── Telegram уведомление ──────────────────────────────────────────────────
 
 def tg_send(text: str):
-    """Отправляем уведомление хозяину в Telegram."""
-    if not TG_TOKEN or not OWNER_TG_ID:
-        return
+    """Отключено — не спамить диагностикой в Telegram."""
+    return  # Диагностика только в stdout
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     body = json.dumps({
         "chat_id": OWNER_TG_ID,
