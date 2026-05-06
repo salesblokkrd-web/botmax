@@ -2167,13 +2167,13 @@ def _parse_blok_plan_claude(text: str) -> list:
 
 ПРИМЕРЫ сообщений бухгалтера:
 "Надо изменить цену у МеликсетянТ на Блок 390х190х188 /3 с дост. с 24.04.26г. на 61,00 руб"
-→ [{"type":"price","client":"МеликсетянТ","price_product":"Блок 390х190х188 /3 с дост.","price_new":61.0,"price_date_from":"24.04.2026"}]
+→ [{{"type":"price","client":"МеликсетянТ","price_product":"Блок 390х190х188 /3 с дост.","price_new":61.0,"price_date_from":"24.04.2026"}}]
 
 "Надо добавить в КонтинентИнвест в Объекты Литер 7 и Литер 11"
-→ [{"type":"object_add","client":"КонтинентИнвест","object_name":"Литер 7"},{"type":"object_add","client":"КонтинентИнвест","object_name":"Литер 11"}]
+→ [{{"type":"object_add","client":"КонтинентИнвест","object_name":"Литер 7"}},{{"type":"object_add","client":"КонтинентИнвест","object_name":"Литер 11"}}]
 
 "Клиент: ИП Горячкина  Оплата: нал"
-→ [{"type":"client_add","client":"ИП Горячкина","payment_type":"нал"}]
+→ [{{"type":"client_add","client":"ИП Горячкина","payment_type":"нал"}}]
 
 Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
 
