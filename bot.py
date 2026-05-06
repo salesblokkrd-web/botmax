@@ -2428,6 +2428,8 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
 
 def process_update(update: dict):
     utype = update.get("update_type")
+    # DEBUG: raw update type
+    print(f"[RAW_UPDATE] type={utype} keys={list(update.keys())[:5]}", flush=True)
 
     if utype == "message_created":
         msg = update.get("message", {})
@@ -2445,6 +2447,9 @@ def process_update(update: dict):
 
         # Логируем ВСЕ входящие сообщения для диагностики
         _debug_log_chat(chat_id, user_name, text[:80] if text else f"[no text, update_type={utype}]")
+
+        # DEBUG: логируем chat_id и тип для диагностики
+        print(f"[DIAG] chat_id={chat_id} type={type(chat_id).__name__} BLOK={BLOK_GROUP_ID} type={type(BLOK_GROUP_ID).__name__} match={chat_id == BLOK_GROUP_ID} sender={user_name} text={text[:40]}", flush=True)
 
         # Сообщение из группы производства — отдельная обработка
         if chat_id == BLOK_GROUP_ID:
