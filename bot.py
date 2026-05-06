@@ -2297,6 +2297,159 @@ def _write_trips_to_sheets(trips: list):
         print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
 
 
+
+def _apply_price_change(client_name: str, product: str, new_price: float, date_from: str = ""):
+    """Обновляет цену в листе клиента в Google Sheets.
+    
+    Ищет лист по имени клиента, находит строки с указанным продуктом
+    (от даты date_from если указана), обновляет столбец H (цена).
+    Столбец I (сумма) — ARRAYFORMULA, пересчитается автоматически.
+    """
+    if not GOOGLE_SA_B64:
+        print("[PRICE] GOOGLE_SA_B64 не задан", flush=True)
+        return False, "Нет доступа к Google Sheets"
+    
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+        
+        # Ищем лист клиента (точное совпадение или содержит)
+        ws = None
+        client_upper = client_name.upper().strip()
+        for sheet in sh.worksheets():
+            if sheet.title.upper().strip() == client_upper:
+                ws = sheet
+                break
+        
+        if not ws:
+            # Пробуем частичное совпадение
+            for sheet in sh.worksheets():
+                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
+                    ws = sheet
+                    break
+        
+        if not ws:
+            msg = f"Лист '{client_name}' не найден"
+            print(f"[PRICE] {msg}", flush=True)
+            return False, msg
+        
+        print(f"[PRICE] Нашёл лист: '{ws.title}'", flush=True)
+        
+        # Получаем все данные листа
+        all_data = ws.get_all_values()
+        
+        # Находим строку заголовков (ищем "продукция" в любом регистре)
+        header_row = None
+        for i, row in enumerate(all_data):
+            for cell in row:
+                if "продукция" in str(cell).lower():
+                    header_row = i
+                    break
+            if header_row is not None:
+                break
+        
+        if header_row is None:
+            msg = f"Не нашёл заголовок 'продукция' в листе '{ws.title}'"
+            print(f"[PRICE] {msg}", flush=True)
+            return False, msg
+        
+        # Определяем индексы колонок
+        headers = all_data[header_row]
+        col_product = None
+        col_price = None
+        col_date = None
+        for j, h in enumerate(headers):
+            h_lower = str(h).lower().strip()
+            if "продукция" in h_lower or "продукт" in h_lower:
+                col_product = j
+            if "цена" in h_lower:
+                col_price = j
+            if "дата" in h_lower:
+                col_date = j
+        
+        if col_product is None or col_price is None:
+            msg = f"Не нашёл колонки продукция/цена в '{ws.title}'"
+            print(f"[PRICE] {msg}", flush=True)
+            return False, msg
+        
+        print(f"[PRICE] Колонки: продукция={col_product}, цена={col_price}, дата={col_date}", flush=True)
+        
+        # Нормализуем имя продукта для сравнения
+        product_norm = product.lower().replace(" ", "").replace("\xa0", "")
+        
+        # Парсим date_from если есть
+        date_from_parsed = None
+        if date_from:
+            try:
+                parts = date_from.split(".")
+                if len(parts) == 3:
+                    d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                    if y < 100:
+                        y += 2000
+                    date_from_parsed = datetime.date(y, m, d)
+            except:
+                pass
+        
+        # Ищем строки для обновления
+        updated_rows = []
+        for i in range(header_row + 1, len(all_data)):
+            row = all_data[i]
+            if col_product >= len(row):
+                continue
+            
+            cell_product = str(row[col_product]).strip()
+            if not cell_product:
+                continue
+            
+            # Нормализованное сравнение
+            cell_norm = cell_product.lower().replace(" ", "").replace("\xa0", "")
+            if product_norm not in cell_norm and cell_norm not in product_norm:
+                continue
+            
+            # Проверяем дату если указана
+            if date_from_parsed and col_date is not None and col_date < len(row):
+                cell_date_str = str(row[col_date]).strip()
+                if cell_date_str:
+                    try:
+                        dp = cell_date_str.split(".")
+                        if len(dp) == 3:
+                            rd = datetime.date(int(dp[2]) if int(dp[2]) > 100 else int(dp[2]) + 2000, int(dp[1]), int(dp[0]))
+                            if rd < date_from_parsed:
+                                continue
+                    except:
+                        pass
+            
+            # Обновляем цену (строка в Sheets = i+1, колонка = col_price+1)
+            sheet_row = i + 1  # 1-based
+            sheet_col = col_price + 1  # 1-based
+            price_str = f"{new_price:.2f}".replace(".", ",")
+            ws.update_cell(sheet_row, sheet_col, new_price)
+            updated_rows.append(f"строка {sheet_row}: {cell_product}")
+            print(f"[PRICE] Обновлена строка {sheet_row}: {cell_product} → {new_price}", flush=True)
+        
+        if not updated_rows:
+            msg = f"Продукт '{product}' не найден в листе '{ws.title}'"
+            print(f"[PRICE] {msg}", flush=True)
+            return False, msg
+        
+        msg = f"Обновлено {len(updated_rows)} строк в '{ws.title}': " + "; ".join(updated_rows)
+        print(f"[PRICE] {msg}", flush=True)
+        return True, msg
+        
+    except Exception as e:
+        msg = f"Ошибка: {e}"
+        print(f"[PRICE] {msg}", flush=True)
+        return False, msg
+
 def _confirm_accounting_events(events: list, sender_name: str):
     """Отправляет подтверждение по бухгалтерским командам в группу."""
     lines = []
@@ -2331,6 +2484,18 @@ def _confirm_accounting_events(events: list, sender_name: str):
         text = header + '\n' + '\n'.join(lines)
         send_msg(BLOK_GROUP_ID, text)
         print(f'[ACCOUNTING] Подтверждение: {text}', flush=True)
+
+        # Применяем изменения цен в листах клиентов
+        for evt in events:
+            if evt.get('type') == 'price':
+                client = evt.get('client', '')
+                product = evt.get('price_product', '')
+                price_new = evt.get('price_new')
+                date_from = evt.get('price_date_from', '')
+                if client and product and price_new is not None:
+                    ok, msg = _apply_price_change(client, product, float(price_new), date_from)
+                    status = '✅' if ok else '⚠️'
+                    send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
 
         # Записываем в Sheets (лист "Бухгалтерия") — только бухгалтерские, НЕ рейсы
         acct_only = [e for e in events if e.get('type') not in ('trip', 'return')]
