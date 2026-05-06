@@ -2068,7 +2068,13 @@ def process_update_safe(update: dict):
         save_state()
     except Exception as e:
         import traceback
-        print(f"[ERROR] process_update: {e}\n{traceback.format_exc()[:400]}", flush=True)
+        err_text = f"[ERROR] {e}\n{traceback.format_exc()[:300]}"
+        print(err_text, flush=True)
+        # DEBUG: отправляем ошибку в группу для диагностики
+        try:
+            _api("POST", "messages", params={"chat_id": BLOK_GROUP_ID}, body={"text": f"[BOT ERROR] {str(e)[:200]}"})
+        except Exception:
+            pass
     finally:
         if lock:
             lock.release()
@@ -2379,6 +2385,20 @@ def _write_accounting_to_sheets(events: list):
 
 def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     """Основная точка входа для сообщений из группы производства."""
+    try:
+        _handle_blok_group_inner(sender_name, text, raw_msg)
+    except Exception as e:
+        import traceback
+        err = f"[BOT CRASH] handle_blok: {e}\n{traceback.format_exc()[:200]}"
+        print(err, flush=True)
+        try:
+            _api("POST", "messages", params={"chat_id": BLOK_GROUP_ID}, body={"text": err[:500]})
+        except Exception:
+            pass
+
+
+def _handle_blok_group_inner(sender_name: str, text: str, raw_msg: dict):
+    """Внутренняя обработка сообщений группы."""
     _log_blok_message(sender_name, text, raw_msg)
 
 
@@ -2734,23 +2754,13 @@ def main():
     except Exception as e:
         print(f"[STARTUP] Диагностика ошибка: {e}", flush=True)
 
-    # DEBUG: отправляем стартовое сообщение владельцу
+    # Proof of life — отправляем в группу напрямую через _api
     try:
-        diag_text = (
-            f"[STARTUP DIAG]\n"
-            f"MAX_BOT_TOKEN: ...{TOKEN[-4:] if TOKEN else 'EMPTY'}\n"
-            f"CLAUDE_API_KEY: ...{CLAUDE_API_KEY[-4:] if CLAUDE_API_KEY else 'EMPTY'}\n"
-            f"BLOK_GROUP_ID: {BLOK_GROUP_ID}\n"
-            f"OWNER_CHAT_ID: {OWNER_CHAT_ID}\n"
-            f"GOOGLE_SA_B64: {'SET' if GOOGLE_SA_B64 else 'EMPTY'}"
-        )
-        if OWNER_CHAT_ID:
-            send_msg(OWNER_CHAT_ID, diag_text)
-            print(f"[STARTUP] Sent diag to owner", flush=True)
-        # Also send to group as proof of life
-        send_msg(BLOK_GROUP_ID, "[BOT] Учётчик перезапущен и готов к работе")
+        _api("POST", "messages", params={"chat_id": BLOK_GROUP_ID},
+             body={"text": f"[BOT] Учётчик v{int(time.time()) % 10000} запущен. BLOK={BLOK_GROUP_ID}"})
+        print("[STARTUP] Proof of life sent to group", flush=True)
     except Exception as e:
-        print(f"[STARTUP] Diag send error: {e}", flush=True)
+        print(f"[STARTUP] Proof of life FAILED: {e}", flush=True)
 
     marker = None
     with ThreadPoolExecutor(max_workers=6) as pool:
