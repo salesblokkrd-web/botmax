@@ -61,6 +61,18 @@ SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
 # Справочники для валидации (должны совпадать с Рейсы!J4:J и K4:K)
 VALID_DRIVERS = {"Кораблев М.Н.", "Адлейба А.Ю.", "Кислицин А.С.", "Камышанов А.А."}
 VALID_TRUCKS = {"у135рх 193", "р319ок 123", "р638хн 123"}
+
+# Сокращения номеров машин (как пишут в чате → полный номер)
+TRUCK_SHORTCUTS = {
+    "135": "у135рх 193",
+    "319": "р319ок 123",
+    "638": "р638хн 123",
+}
+
+# Дедупликация: храним хеши последних обработанных событий
+_dedup_cache = {}  # {hash: timestamp} — TTL 24 часа
+_DEDUP_TTL = 86400  # 24 часа в секундах
+
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 
 PRODUCTS = {
@@ -2099,6 +2111,50 @@ def _debug_log_chat(chat_id: int, sender: str, text_preview: str):
         pass
 
 
+
+def _dedup_check(event: dict) -> bool:
+    """Проверяет, не было ли это событие уже обработано за последние 24ч.
+    Возвращает True если ДУБЛИКАТ (уже было), False если новое."""
+    import hashlib
+    now = time.time()
+    # Чистим устаревшие записи
+    expired = [k for k, v in _dedup_cache.items() if now - v > _DEDUP_TTL]
+    for k in expired:
+        del _dedup_cache[k]
+    # Хеш по ключевым полям события
+    key_parts = [
+        event.get('type', ''),
+        event.get('client', ''),
+        event.get('product', ''),
+        str(event.get('price', '')),
+        event.get('driver', ''),
+        event.get('truck', ''),
+        event.get('from_location', ''),
+        event.get('to_location', ''),
+    ]
+    h = hashlib.md5('|'.join(key_parts).lower().encode()).hexdigest()
+    if h in _dedup_cache:
+        print(f"[DEDUP] Дубликат отклонён: {key_parts}", flush=True)
+        return True
+    _dedup_cache[h] = now
+    return False
+
+
+def _normalize_truck(truck: str) -> str:
+    """Раскрывает сокращения номеров машин: 135 → у135рх 193"""
+    if not truck:
+        return truck
+    truck_stripped = truck.strip()
+    # Если это просто число (сокращение)
+    if truck_stripped in TRUCK_SHORTCUTS:
+        return TRUCK_SHORTCUTS[truck_stripped]
+    # Если число внутри текста: "135го", "135-му"
+    for short, full in TRUCK_SHORTCUTS.items():
+        if short in truck_stripped and len(truck_stripped) < 10:
+            return full
+    return truck
+
+
 def _log_blok_message(sender_name: str, text: str, raw: dict):
     """Пишем сырое сообщение из группы в лог-файл для анализа формата."""
     log_path = os.path.join(DATA_DIR, "blok_group_log.jsonl")
@@ -2253,6 +2309,9 @@ def _write_trips_to_sheets(trips: list):
                 last_num = max(last_num, int(v))
 
         for trip in trips:
+            # Нормализуем номер машины (сокращения → полный)
+            if trip.get('truck'):
+                trip['truck'] = _normalize_truck(trip['truck'])
             evt_type = trip.get("type", "trip")
             last_num += 1
 
@@ -2519,6 +2578,16 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
         return
+
+    # Дедупликация — отсекаем повторные сообщения (Светлана повторяет 3-6 раз)
+    unique_trips = [t for t in trips if not _dedup_check(t)]
+    if not unique_trips:
+        print(f"[DEDUP] Все {len(trips)} событий — дубликаты, пропускаем", flush=True)
+        send_msg(BLOK_GROUP_ID, "ℹ️ Уже записано ранее, повторная запись не требуется.")
+        return
+    if len(unique_trips) < len(trips):
+        print(f"[DEDUP] {len(trips) - len(unique_trips)} дубликатов отклонено из {len(trips)}", flush=True)
+    trips = unique_trips
 
     print(f"[BLOK_GROUP] Распарсено {len(trips)} событий: {trips}", flush=True)
 
