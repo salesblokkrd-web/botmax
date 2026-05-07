@@ -2253,14 +2253,9 @@ def _write_trips_to_sheets(trips: list):
             last_num += 1
 
             if evt_type == "price":
-                # Изменение цены — записываем как комментарий
-                price_info = f"ЦЕНА: {trip.get('price_product','')} {trip.get('price_old','')}→{trip.get('price_new','')}"
-                row = [
-                    str(last_num),
-                    trip.get("date") or datetime.date.today().strftime("%d.%m.%Y"),
-                    "", "", "", "", "",
-                    price_info,
-                ]
+                # Цены НЕ пишем в лист Рейсы — они идут в секцию «Контактное лицо» через _apply_price_change
+                last_num -= 1  # откатываем счётчик
+                continue
             elif evt_type == "return":
                 # Возврат поддонов
                 ret_info = f"ВОЗВРАТ поддонов: {trip.get('return_pallets','')} шт"
@@ -2299,21 +2294,23 @@ def _write_trips_to_sheets(trips: list):
 
 
 def _apply_price_change(client_name: str, product: str, new_price: float, date_from: str = ""):
-    """Обновляет цену в листе клиента в Google Sheets.
-    
-    Ищет лист по имени клиента, находит строки с указанным продуктом
-    (от даты date_from если указана), обновляет столбец H (цена).
-    Столбец I (сумма) — ARRAYFORMULA, пересчитается автоматически.
+    """Добавляет новую цену в секцию 'Контактное лицо' листа клиента.
+
+    Секция расположена в колонках AF-AK:
+      AF=дата, AG=клиент, AH=продукция, AI=шт/пдн, AJ=руб/шт, AK=примечания
+
+    НЕ трогает колонку H (цены в продажах) — там исторические данные.
+    Добавляет новую строку после последней заполненной в секции.
     """
     if not GOOGLE_SA_B64:
         print("[PRICE] GOOGLE_SA_B64 не задан", flush=True)
         return False, "Нет доступа к Google Sheets"
-    
+
     try:
         import base64
         import gspread
         from google.oauth2.service_account import Credentials
-        
+
         sa_json = base64.b64decode(GOOGLE_SA_B64)
         sa_info = json.loads(sa_json)
         creds = Credentials.from_service_account_info(
@@ -2321,130 +2318,54 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
         )
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(SHEETS_ID)
-        
-        # Ищем лист клиента (точное совпадение или содержит)
+
+        # Ищем лист клиента
         ws = None
         client_upper = client_name.upper().strip()
         for sheet in sh.worksheets():
             if sheet.title.upper().strip() == client_upper:
                 ws = sheet
                 break
-        
+
         if not ws:
-            # Пробуем частичное совпадение
             for sheet in sh.worksheets():
                 if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
                     ws = sheet
                     break
-        
+
         if not ws:
             msg = f"Лист '{client_name}' не найден"
             print(f"[PRICE] {msg}", flush=True)
             return False, msg
-        
+
         print(f"[PRICE] Нашёл лист: '{ws.title}'", flush=True)
-        
-        # Получаем все данные листа
-        all_data = ws.get_all_values()
-        
-        # Находим строку заголовков (ищем "продукция" в любом регистре)
-        header_row = None
-        for i, row in enumerate(all_data):
-            for cell in row:
-                if "продукция" in str(cell).lower():
-                    header_row = i
-                    break
-            if header_row is not None:
-                break
-        
-        if header_row is None:
-            msg = f"Не нашёл заголовок 'продукция' в листе '{ws.title}'"
-            print(f"[PRICE] {msg}", flush=True)
-            return False, msg
-        
-        # Определяем индексы колонок
-        headers = all_data[header_row]
-        col_product = None
-        col_price = None
-        col_date = None
-        for j, h in enumerate(headers):
-            h_lower = str(h).lower().strip()
-            if "продукция" in h_lower or "продукт" in h_lower:
-                col_product = j
-            if "цена" in h_lower:
-                col_price = j
-            if "дата" in h_lower:
-                col_date = j
-        
-        if col_product is None or col_price is None:
-            msg = f"Не нашёл колонки продукция/цена в '{ws.title}'"
-            print(f"[PRICE] {msg}", flush=True)
-            return False, msg
-        
-        print(f"[PRICE] Колонки: продукция={col_product}, цена={col_price}, дата={col_date}", flush=True)
-        
-        # Нормализуем имя продукта для сравнения
-        product_norm = product.lower().replace(" ", "").replace("\xa0", "")
-        
-        # Парсим date_from если есть
-        date_from_parsed = None
-        if date_from:
-            try:
-                parts = date_from.split(".")
-                if len(parts) == 3:
-                    d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-                    if y < 100:
-                        y += 2000
-                    date_from_parsed = datetime.date(y, m, d)
-            except:
-                pass
-        
-        # Ищем строки для обновления
-        updated_rows = []
-        for i in range(header_row + 1, len(all_data)):
-            row = all_data[i]
-            if col_product >= len(row):
-                continue
-            
-            cell_product = str(row[col_product]).strip()
-            if not cell_product:
-                continue
-            
-            # Нормализованное сравнение
-            cell_norm = cell_product.lower().replace(" ", "").replace("\xa0", "")
-            if product_norm not in cell_norm and cell_norm not in product_norm:
-                continue
-            
-            # Проверяем дату если указана
-            if date_from_parsed and col_date is not None and col_date < len(row):
-                cell_date_str = str(row[col_date]).strip()
-                if cell_date_str:
-                    try:
-                        dp = cell_date_str.split(".")
-                        if len(dp) == 3:
-                            rd = datetime.date(int(dp[2]) if int(dp[2]) > 100 else int(dp[2]) + 2000, int(dp[1]), int(dp[0]))
-                            if rd < date_from_parsed:
-                                continue
-                    except:
-                        pass
-            
-            # Обновляем цену (строка в Sheets = i+1, колонка = col_price+1)
-            sheet_row = i + 1  # 1-based
-            sheet_col = col_price + 1  # 1-based
-            price_str = f"{new_price:.2f}".replace(".", ",")
-            ws.update_cell(sheet_row, sheet_col, new_price)
-            updated_rows.append(f"строка {sheet_row}: {cell_product}")
-            print(f"[PRICE] Обновлена строка {sheet_row}: {cell_product} → {new_price}", flush=True)
-        
-        if not updated_rows:
-            msg = f"Продукт '{product}' не найден в листе '{ws.title}'"
-            print(f"[PRICE] {msg}", flush=True)
-            return False, msg
-        
-        msg = f"Обновлено {len(updated_rows)} строк в '{ws.title}': " + "; ".join(updated_rows)
+
+        # Секция «Контактное лицо» в колонках AF-AK (1-based: 32-37)
+        # AF=32(дата), AG=33(клиент), AH=34(продукция), AI=35(шт/пдн), AJ=36(руб/шт), AK=37(примечания)
+        COL_DATE = 32    # AF
+        COL_PRODUCT = 34 # AH
+        COL_PRICE = 36   # AJ
+
+        # Читаем секцию для поиска последней заполненной строки
+        price_data = ws.get("AH7:AJ50")
+
+        last_filled_row = 6  # строка 7 = первая строка данных
+        for i, row in enumerate(price_data, 7):
+            if row and any(str(c).strip() for c in row):
+                last_filled_row = i
+
+        new_row = last_filled_row + 1
+        price_date = date_from if date_from else datetime.date.today().strftime("%d.%m.%Y")
+
+        # Записываем новую строку цены
+        ws.update_cell(new_row, COL_DATE, price_date)
+        ws.update_cell(new_row, COL_PRODUCT, product)
+        ws.update_cell(new_row, COL_PRICE, new_price)
+
+        msg = f"Цена добавлена в '{ws.title}' строка {new_row}: {product} = {new_price} руб. с {price_date}"
         print(f"[PRICE] {msg}", flush=True)
         return True, msg
-        
+
     except Exception as e:
         msg = f"Ошибка: {e}"
         print(f"[PRICE] {msg}", flush=True)
