@@ -2463,6 +2463,98 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
         print(f"[PRICE] {msg}", flush=True)
         return False, msg
 
+def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_method: str = ""):
+    """Записывает оплату в лист клиента, секция ОПЛАТА (колонки O-V).
+    
+    O = дата, P = ООО (checkbox), Q = ИП (checkbox), R = Нал (checkbox),
+    S = клиент/объект, T = примечание, U = сумма, V = "Деньги"/"Бартер"
+    """
+    if not GOOGLE_SA_B64:
+        return False, "Нет доступа к Google Sheets"
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+
+        # Ищем лист клиента
+        ws = None
+        client_upper = client_name.upper().strip()
+        for sheet in sh.worksheets():
+            if sheet.title.upper().strip() == client_upper:
+                ws = sheet
+                break
+        if not ws:
+            for sheet in sh.worksheets():
+                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
+                    ws = sheet
+                    break
+        if not ws:
+            return False, f"Лист \'{client_name}\' не найден"
+
+        print(f"[PAYMENT] Нашёл лист: \'{ws.title}\'", flush=True)
+
+        # Ищем первую пустую строку в секции ОПЛАТА (O8:O150)
+        payment_dates = ws.get("O8:O150")
+        empty_row = 8  # начало секции
+        for i, row in enumerate(payment_dates, 8):
+            if row and str(row[0]).strip():
+                empty_row = i + 1
+            else:
+                empty_row = i
+                break
+        else:
+            empty_row = len(payment_dates) + 8
+
+        # Колонки: O=15, P=16(ООО), Q=17(ИП), R=18(Нал), S=19, T=20, U=21, V=22
+        COL_DATE = 15   # O
+        COL_OOO = 16    # P — checkbox ООО
+        COL_IP = 17     # Q — checkbox ИП
+        COL_NAL = 18    # R — checkbox Нал
+        COL_CLIENT = 19 # S
+        COL_NOTE = 20   # T
+        COL_SUM = 21    # U
+        COL_TYPE = 22   # V
+
+        today = datetime.date.today().strftime("%d.%m.%Y")
+
+        # Определяем куда ставить галочку
+        # pay_type: "нал"/"безнал", pay_method: "ИП"/"ООО"
+        is_nal = "нал" in pay_type.lower() and "безнал" not in pay_type.lower()
+        is_ip = pay_method.upper() == "ИП" or ("ип" in pay_type.lower() and not is_nal)
+        is_ooo = pay_method.upper() == "ООО" or ("ооо" in pay_type.lower())
+        
+        # Если безнал без уточнения ИП/ООО — ставим ООО по умолчанию
+        if "безнал" in pay_type.lower() and not is_ip and not is_ooo:
+            is_ooo = True
+        # Если ничего не определено — ставим Нал (частник, наличные)
+        if not is_nal and not is_ip and not is_ooo:
+            is_nal = True
+
+        ws.update_cell(empty_row, COL_DATE, today)
+        ws.update_cell(empty_row, COL_OOO, True if is_ooo else False)
+        ws.update_cell(empty_row, COL_IP, True if is_ip else False)
+        ws.update_cell(empty_row, COL_NAL, True if is_nal else False)
+        ws.update_cell(empty_row, COL_SUM, amount)
+        ws.update_cell(empty_row, COL_TYPE, "Деньги")
+
+        checkbox = "ООО" if is_ooo else ("ИП" if is_ip else "Нал")
+        msg = f"Оплата записана в \'{ws.title}\' строка {empty_row}: {amount} руб. ({checkbox})"
+        print(f"[PAYMENT] {msg}", flush=True)
+        return True, msg
+
+    except Exception as e:
+        msg = f"Ошибка: {e}"
+        print(f"[PAYMENT] {msg}", flush=True)
+        return False, msg
+
+
 def _confirm_accounting_events(events: list, sender_name: str):
     """Отправляет подтверждение по бухгалтерским командам в группу."""
     lines = []
@@ -2502,7 +2594,7 @@ def _confirm_accounting_events(events: list, sender_name: str):
         send_msg(BLOK_GROUP_ID, text)
         print(f'[ACCOUNTING] Подтверждение: {text}', flush=True)
 
-        # Применяем изменения цен в листах клиентов
+        # Применяем изменения в листах клиентов
         for evt in events:
             if evt.get('type') == 'price':
                 client = evt.get('client', '')
@@ -2511,6 +2603,15 @@ def _confirm_accounting_events(events: list, sender_name: str):
                 date_from = evt.get('price_date_from', '')
                 if client and product and price_new is not None:
                     ok, msg = _apply_price_change(client, product, float(price_new), date_from)
+                    status = '✅' if ok else '⚠️'
+                    send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
+            elif evt.get('type') == 'payment_info':
+                client = evt.get('client', '')
+                amount = evt.get('payment_amount')
+                pay_type = evt.get('payment_type', '')  # нал/безнал
+                pay_method = evt.get('payment_method', '')  # ИП/ООО
+                if client and amount:
+                    ok, msg = _apply_payment(client, float(amount), pay_type, pay_method)
                     status = '✅' if ok else '⚠️'
                     send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
 
