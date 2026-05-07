@@ -2223,6 +2223,8 @@ def _parse_blok_plan_claude(text: str) -> list:
 - price_date_from: дата начала действия цены (для type=price), формат ДД.ММ.ГГГГ
 - object_name: название объекта (для type=object_add), напр. "Литер 7"
 - payment_type: тип оплаты "нал" или "безнал" (для type=payment_info)
+- payment_amount: сумма оплаты в рублях (число, для type=payment_info)
+- payment_method: "ИП" или "ООО" (куда оплатили, для type=payment_info)
 - comment: доп. информация, которая не вписывается в другие поля
 
 ПРИМЕРЫ сообщений бухгалтера:
@@ -2234,6 +2236,12 @@ def _parse_blok_plan_claude(text: str) -> list:
 
 "Клиент: ИП Горячкина  Оплата: нал"
 → [{{"type":"client_add","client":"ИП Горячкина","payment_type":"нал"}}]
+
+"Оплатил Горячкина наличные 50000"
+→ [{{"type":"payment_info","client":"Горячкина","payment_type":"нал","payment_amount":50000}}]
+
+"Оплатила организация МеликсетянТ на ИП 120000 руб"
+→ [{{"type":"payment_info","client":"МеликсетянТ","payment_type":"безнал","payment_amount":120000,"payment_method":"ИП"}}]
 
 Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
 
@@ -2278,6 +2286,12 @@ def _parse_blok_plan_claude(text: str) -> list:
                 evt['price_date_from'] = evt.pop('date_from')
             if 'name' in evt and 'object_name' not in evt and evt.get('type') == 'object_add':
                 evt['object_name'] = evt.pop('name')
+            if 'amount' in evt and 'payment_amount' not in evt:
+                evt['payment_amount'] = evt.pop('amount')
+            if 'method' in evt and 'payment_method' not in evt:
+                evt['payment_method'] = evt.pop('method')
+            if 'sum' in evt and 'payment_amount' not in evt:
+                evt['payment_amount'] = evt.pop('sum')
         return events
     except Exception as e:
         print(f"[BLOK_PARSE] Ошибка: {e}", flush=True)
@@ -2473,7 +2487,11 @@ def _confirm_accounting_events(events: list, sender_name: str):
             lines.append(f'✏️ Изменение: {client} — {comment}')
         elif etype == 'payment_info':
             pay = evt.get('payment_type', '—')
-            lines.append(f'💳 Оплата: {client} — {pay}')
+            amount = evt.get('payment_amount', '')
+            method = evt.get('payment_method', '')
+            amount_str = f' {amount} руб.' if amount else ''
+            method_str = f' на {method}' if method else ''
+            lines.append(f'💳 Оплата: {client} — {pay}{amount_str}{method_str}')
         else:
             comment = evt.get('comment', '')
             lines.append(f'📋 {etype}: {client} {comment}')
@@ -2532,15 +2550,30 @@ def _write_accounting_to_sheets(events: list):
 
         for evt in events:
             last_num += 1
+            # Сумма: для цен — price_new, для оплат — payment_amount
+            amount = evt.get('price_new') or evt.get('payment_amount') or ''
+            product = evt.get('price_product', '')
+            # Для оплат: дополняем информацию
+            comment = evt.get('comment', '')
+            if evt.get('type') == 'payment_info':
+                pay_type = evt.get('payment_type', '')
+                pay_method = evt.get('payment_method', '')
+                parts = []
+                if pay_type:
+                    parts.append(pay_type)
+                if pay_method:
+                    parts.append(f'на {pay_method}')
+                if parts:
+                    comment = ', '.join(parts) + (f'; {comment}' if comment else '')
             row = [
                 str(last_num),
                 evt.get('date') or datetime.date.today().strftime('%d.%m.%Y'),
                 evt.get('type', ''),
                 evt.get('client', ''),
-                evt.get('price_product', ''),
-                str(evt.get('price_new', '')) if evt.get('price_new') else '',
+                product,
+                str(amount) if amount else '',
                 evt.get('object_name', ''),
-                evt.get('comment', ''),
+                comment,
             ]
             ws.append_row(row, value_input_option='USER_ENTERED')
             print(f'[ACCOUNTING_SHEETS] Добавлено: {row}', flush=True)
@@ -2570,6 +2603,7 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
         # Бухгалтерские команды (Светлана)
         "надо", "необходимо", "изменить", "добавить", "удалить", "клиент", "оплат",
         "объект", "литер", "390х", "188", "нал ", "безнал",
+        "оплатил", "оплатила", "внёс", "внес", "перевёл", "перевел", "перечисл",
     )
     if not any(kw in text.lower() for kw in keywords):
         return  # Не похоже на задание — просто логируем
