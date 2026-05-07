@@ -57,6 +57,10 @@ WORK_HOURS = "пн–сб 8:00–18:00"
 BLOK_GROUP_ID = int(os.environ.get("BLOK_GROUP_ID", "-68840834804304"))  # Производство Тихорецкая
 GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")  # base64(service_account.json)
 SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
+
+# Справочники для валидации (должны совпадать с Рейсы!J4:J и K4:K)
+VALID_DRIVERS = {"Кораблев М.Н.", "Адлейба А.Ю.", "Кислицин А.С.", "Камышанов А.А."}
+VALID_TRUCKS = {"у135рх 193", "р319ок 123", "р638хн 123"}
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 
 PRODUCTS = {
@@ -2272,10 +2276,9 @@ def _write_trips_to_sheets(trips: list):
                     ret_info,
                 ]
             else:
-                # Рейс — стандартный формат таблицы
-                product = trip.get("product") or trip.get("block_type") or ""
-                if trip.get("pallets"):
-                    product += f" ({trip.get('pallets')} подд.)"
+                # Рейс — формат продукции: "20(3-0)" или "20(3-0)+9(2-0)"
+                # Парсер возвращает product в правильном формате, pallets уже внутри
+                product = trip.get("product") or ""
                 row = [
                     str(last_num),
                     trip.get("date") or datetime.date.today().strftime("%d.%m.%Y"),
@@ -2286,7 +2289,23 @@ def _write_trips_to_sheets(trips: list):
                     trip.get("client") or "",
                     product,
                 ]
+            # Валидация водителя и машины
+            driver = trip.get("driver") or ""
+            truck = trip.get("truck") or ""
+            warnings = []
+            if driver and driver not in VALID_DRIVERS:
+                warnings.append(f"неизвестный водитель '{driver}'")
+            if truck and truck not in VALID_TRUCKS:
+                warnings.append(f"неизвестная машина '{truck}'")
+
             ws.append_row(row, value_input_option="USER_ENTERED")
+            # Подтверждение в группу
+            confirm = f"✅ Рейс #{last_num}: {driver} ({truck})\n"
+            confirm += f"{trip.get('from_location','')} → {trip.get('to_location','')} | {trip.get('client','')}\n"
+            confirm += f"Продукция: {row[-1]}"
+            if warnings:
+                confirm += "\n⚠️ " + ", ".join(warnings)
+            send_msg(BLOK_GROUP_ID, confirm)
             print(f"[BLOK_SHEETS] Добавлен {evt_type}: {row}", flush=True)
     except Exception as e:
         print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
@@ -2508,9 +2527,10 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     if sheet_events:
         _write_trips_to_sheets(sheet_events)
 
-    # ВСЕ события → подтверждение в чат (включая price)
-    if trips:
-        _confirm_accounting_events(trips, sender_name)
+    # Бухгалтерские события → подтверждение в чат (рейсы уже подтверждены в _write_trips_to_sheets)
+    non_trip_events = [t for t in trips if t.get('type') not in ('trip', 'return')]
+    if non_trip_events:
+        _confirm_accounting_events(non_trip_events, sender_name)
 
 
 def process_update(update: dict):
