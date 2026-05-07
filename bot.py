@@ -2335,7 +2335,7 @@ def _write_trips_to_sheets(trips: list):
                 continue
             elif evt_type == "return":
                 # Возврат поддонов
-                ret_info = f"ВОЗВРАТ поддонов: {trip.get('return_pallets','')} шт"
+                ret_info = f"ВОЗВРАТ поддонов: {trip.get('return_pallets') or ''} шт"
                 if trip.get("pallet_type"):
                     ret_info += f" ({trip.get('pallet_type')})"
                 row = [
@@ -2561,33 +2561,33 @@ def _confirm_accounting_events(events: list, sender_name: str):
     """Отправляет подтверждение по бухгалтерским командам в группу."""
     lines = []
     for evt in events:
-        etype = evt.get('type', '')
-        client = evt.get('client', '—')
+        etype = evt.get('type') or ''
+        client = evt.get('client') or '—'
         if etype == 'price':
-            product = evt.get('price_product', '—')
-            new_price = evt.get('price_new', '—')
-            date_from = evt.get('price_date_from', '')
+            product = evt.get('price_product') or '—'
+            new_price = evt.get('price_new') or '—'
+            date_from = evt.get('price_date_from') or ''
             date_str = f' с {date_from}' if date_from else ''
             lines.append(f'💰 Цена: {client} → {product} = {new_price} руб.{date_str}')
         elif etype == 'object_add':
-            obj = evt.get('object_name', '—')
+            obj = evt.get('object_name') or '—'
             lines.append(f'🏗 Объект: добавить «{obj}» для {client}')
         elif etype == 'client_add':
-            pay = evt.get('payment_type', '')
+            pay = evt.get('payment_type') or ''
             pay_str = f' (оплата: {pay})' if pay else ''
             lines.append(f'👤 Новый клиент: {client}{pay_str}')
         elif etype == 'client_edit':
-            comment = evt.get('comment', '—')
+            comment = evt.get('comment') or '—'
             lines.append(f'✏️ Изменение: {client} — {comment}')
         elif etype == 'payment_info':
-            pay = evt.get('payment_type', '—')
-            amount = evt.get('payment_amount', '')
-            method = evt.get('payment_method', '')
+            pay = evt.get('payment_type') or '—'
+            amount = evt.get('payment_amount') or ''
+            method = evt.get('payment_method') or ''
             amount_str = f' {amount} руб.' if amount else ''
             method_str = f' на {method}' if method else ''
             lines.append(f'💳 Оплата: {client} — {pay}{amount_str}{method_str}')
         else:
-            comment = evt.get('comment', '')
+            comment = evt.get('comment') or ''
             lines.append(f'📋 {etype}: {client} {comment}')
 
     if lines:
@@ -2599,19 +2599,19 @@ def _confirm_accounting_events(events: list, sender_name: str):
         # Применяем изменения в листах клиентов
         for evt in events:
             if evt.get('type') == 'price':
-                client = evt.get('client', '')
-                product = evt.get('price_product', '')
+                client = evt.get('client') or ''
+                product = evt.get('price_product') or ''
                 price_new = evt.get('price_new')
-                date_from = evt.get('price_date_from', '')
+                date_from = evt.get('price_date_from') or ''
                 if client and product and price_new is not None:
                     ok, msg = _apply_price_change(client, product, float(price_new), date_from)
                     status = '✅' if ok else '⚠️'
                     send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
             elif evt.get('type') == 'payment_info':
-                client = evt.get('client', '')
+                client = evt.get('client') or ''
                 amount = evt.get('payment_amount')
-                pay_type = evt.get('payment_type', '')  # нал/безнал
-                pay_method = evt.get('payment_method', '')  # ИП/ООО
+                pay_type = evt.get('payment_type') or ''  # нал/безнал
+                pay_method = evt.get('payment_method') or ''  # ИП/ООО
                 if client and amount:
                     ok, msg = _apply_payment(client, float(amount), pay_type, pay_method)
                     status = '✅' if ok else '⚠️'
@@ -2655,12 +2655,12 @@ def _write_accounting_to_sheets(events: list):
             last_num += 1
             # Сумма: для цен — price_new, для оплат — payment_amount
             amount = evt.get('price_new') or evt.get('payment_amount') or ''
-            product = evt.get('price_product', '')
+            product = evt.get('price_product') or ''
             # Для оплат: дополняем информацию
-            comment = evt.get('comment', '')
+            comment = evt.get('comment') or ''
             if evt.get('type') == 'payment_info':
-                pay_type = evt.get('payment_type', '')
-                pay_method = evt.get('payment_method', '')
+                pay_type = evt.get('payment_type') or ''
+                pay_method = evt.get('payment_method') or ''
                 parts = []
                 if pay_type:
                     parts.append(pay_type)
@@ -2671,11 +2671,11 @@ def _write_accounting_to_sheets(events: list):
             row = [
                 str(last_num),
                 evt.get('date') or datetime.date.today().strftime('%d.%m.%Y'),
-                evt.get('type', ''),
-                evt.get('client', ''),
+                evt.get('type') or '',
+                evt.get('client') or '',
                 product,
                 str(amount) if amount else '',
-                evt.get('object_name', ''),
+                evt.get('object_name') or '',
                 comment,
             ]
             ws.append_row(row, value_input_option='USER_ENTERED')
@@ -3028,16 +3028,16 @@ def _run_self_test():
     # Построим подтверждение как в реальной обработке
     lines = []
     for evt in events:
-        etype = evt.get('type', '')
-        client = evt.get('client', '—')
+        etype = evt.get('type') or ''
+        client = evt.get('client') or '—'
         if etype == 'price':
-            product = evt.get('price_product', '—')
-            new_price = evt.get('price_new', '—')
-            date_from = evt.get('price_date_from', '')
+            product = evt.get('price_product') or '—'
+            new_price = evt.get('price_new') or '—'
+            date_from = evt.get('price_date_from') or ''
             date_str = f' с {date_from}' if date_from else ''
             lines.append(f'💰 Цена: {client} → {product} = {new_price} руб.{date_str}')
         elif etype == 'object_add':
-            obj = evt.get('object_name', '—')
+            obj = evt.get('object_name') or '—'
             lines.append(f'🏗 Объект: «{obj}» для {client}')
         elif etype == 'client_add':
             lines.append(f'👤 Клиент: {client}')
