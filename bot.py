@@ -465,6 +465,11 @@ def send_msg(chat_id: int, text: str, buttons=None) -> dict:
             "payload": {"buttons": buttons}
         }]
     return _api("POST", "messages", params={"chat_id": chat_id}, body=body)
+def send_action(chat_id: int, action: str = "typing_on") -> dict:
+    """Отправить индикатор действия (typing_on) в чат."""
+    return _api("POST", f"chats/{chat_id}/actions", body={"action": action})
+
+
 
 
 def send_photo_msg(chat_id: int, photo_url: str, caption: str = "") -> dict:
@@ -2710,6 +2715,10 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     )
     if not any(kw in text.lower() for kw in keywords):
         return  # Не похоже на задание — просто логируем
+
+    # Показываем индикатор "печатает..." пока бот обрабатывает
+    send_action(BLOK_GROUP_ID, "typing_on")
+
 
     trips = _parse_blok_plan_claude(text)
     if not trips:
