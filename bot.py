@@ -2123,14 +2123,14 @@ def _dedup_check(event: dict) -> bool:
         del _dedup_cache[k]
     # Хеш по ключевым полям события
     key_parts = [
-        event.get('type', ''),
-        event.get('client', ''),
-        event.get('product', ''),
-        str(event.get('price', '')),
-        event.get('driver', ''),
-        event.get('truck', ''),
-        event.get('from_location', ''),
-        event.get('to_location', ''),
+        event.get('type') or '',
+        event.get('client') or '',
+        event.get('product') or '',
+        str(event.get('price') or ''),
+        event.get('driver') or '',
+        event.get('truck') or '',
+        event.get('from_location') or '',
+        event.get('to_location') or '',
     ]
     h = hashlib.md5('|'.join(key_parts).lower().encode()).hexdigest()
     if h in _dedup_cache:
