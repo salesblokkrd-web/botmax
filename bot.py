@@ -2444,7 +2444,7 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
         COL_PRICE = 36   # AJ
 
         # Читаем секцию для поиска последней заполненной строки
-        price_data = ws.get("AH7:AJ50")
+        price_data = ws.get("AH7:AJ200")
 
         last_filled_row = 6  # строка 7 = первая строка данных
         for i, row in enumerate(price_data, 7):
