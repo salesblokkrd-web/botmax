@@ -2543,6 +2543,8 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
         ws.update_cell(empty_row, COL_NAL, True if is_nal else False)
         ws.update_cell(empty_row, COL_SUM, amount)
         ws.update_cell(empty_row, COL_TYPE, "Деньги")
+        # S (COL_CLIENT) имеет DataValidation ONE_OF_RANGE → $AM$8:$AM$149
+        # НЕ пишем сюда текстом — только если значение есть в справочнике AM
 
         checkbox = "ООО" if is_ooo else ("ИП" if is_ip else "Нал")
         msg = f"Оплата записана в \'{ws.title}\' строка {empty_row}: {amount} руб. ({checkbox})"
