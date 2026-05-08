@@ -2535,7 +2535,7 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
         print(f"[PRICE] {msg}", flush=True)
         return False, msg
 
-def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_method: str = ""):
+def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_method: str = "", payment_date: str = ""):
     """Записывает оплату в лист клиента, секция ОПЛАТА (колонки O-V).
     
     O = дата, P = ООО (checkbox), Q = ИП (checkbox), R = Нал (checkbox),
@@ -2594,7 +2594,7 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
         COL_SUM = 21    # U
         COL_TYPE = 22   # V
 
-        today = datetime.date.today().strftime("%d.%m.%Y")
+        today = payment_date if payment_date else datetime.date.today().strftime("%d.%m.%Y")
 
         # Определяем куда ставить галочку
         # pay_type: "нал"/"безнал", pay_method: "ИП"/"ООО"
@@ -2690,8 +2690,9 @@ def _confirm_accounting_events(events: list, sender_name: str):
                 amount = evt.get('payment_amount')
                 pay_type = evt.get('payment_type') or ''  # нал/безнал
                 pay_method = evt.get('payment_method') or ''  # ИП/ООО
+                evt_date = evt.get('date') or ''
                 if client and amount:
-                    ok, msg = _apply_payment(client, float(amount), pay_type, pay_method)
+                    ok, msg = _apply_payment(client, float(amount), pay_type, pay_method, evt_date)
                     status = '✅' if ok else '⚠️'
                     send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
 
