@@ -2129,6 +2129,7 @@ def _dedup_check(event: dict) -> bool:
     # Хеш по ключевым полям события
     key_parts = [
         event.get('type') or '',
+        event.get('date') or '',
         event.get('client') or '',
         event.get('product') or event.get('price_product') or '',
         str(event.get('price') or event.get('price_new') or ''),
@@ -2140,6 +2141,8 @@ def _dedup_check(event: dict) -> bool:
         event.get('price_date_from') or '',
         event.get('object_name') or '',
         str(event.get('payment_amount') or ''),
+        event.get('payment_type') or '',
+        event.get('payment_method') or '',
     ]
     h = hashlib.md5('|'.join(key_parts).lower().encode()).hexdigest()
     if h in _dedup_cache:
@@ -2406,7 +2409,7 @@ def _write_trips_to_sheets(trips: list):
 
 
 
-def _apply_price_change(client_name: str, product: str, new_price: float, date_from: str = "", contact_name: str = "", qty_per_pallet: int = 0):
+def _apply_price_change(client_name: str, product: str, new_price: float, date_from: str = "", contact_name: str = "", qty_per_pallet: str = ""):
     """Добавляет новую цену в секцию 'Контактное лицо' листа клиента.
 
     Секция расположена в колонках AF-AK:
@@ -2481,7 +2484,7 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
         price_date = date_from if date_from else datetime.date.today().strftime("%d.%m.%Y")
 
         # Определяем шт/пдн: из аргумента, или из предыдущих записей
-        final_qty = str(qty_per_pallet) if qty_per_pallet else found_qty
+        final_qty = qty_per_pallet if qty_per_pallet else found_qty
 
         # Проверяем: может последняя строка — тот же продукт+цена, но AG пустой?
         # Если да — дописываем в неё (не создаём дубль)
@@ -2640,8 +2643,10 @@ def _confirm_accounting_events(events: list, sender_name: str):
             product = evt.get('price_product') or '—'
             new_price = evt.get('price_new') or '—'
             date_from = evt.get('price_date_from') or ''
+            contact = evt.get('price_contact') or ''
             date_str = f' с {date_from}' if date_from else ''
-            lines.append(f'💰 Цена: {client} → {product} = {new_price} руб.{date_str}')
+            contact_str = f' ({contact})' if contact else ''
+            lines.append(f'💰 Цена: {client}{contact_str} → {product} = {new_price} руб.{date_str}')
         elif etype == 'object_add':
             obj = evt.get('object_name') or '—'
             lines.append(f'🏗 Объект: добавить «{obj}» для {client}')
@@ -2656,9 +2661,11 @@ def _confirm_accounting_events(events: list, sender_name: str):
             pay = evt.get('payment_type') or '—'
             amount = evt.get('payment_amount') or ''
             method = evt.get('payment_method') or ''
+            evt_date = evt.get('date') or ''
             amount_str = f' {amount} руб.' if amount else ''
             method_str = f' на {method}' if method else ''
-            lines.append(f'💳 Оплата: {client} — {pay}{amount_str}{method_str}')
+            date_str = f' от {evt_date}' if evt_date else ''
+            lines.append(f'💳 Оплата: {client} — {pay}{amount_str}{method_str}{date_str}')
         else:
             comment = evt.get('comment') or ''
             lines.append(f'📋 {etype}: {client} {comment}')
@@ -2677,11 +2684,7 @@ def _confirm_accounting_events(events: list, sender_name: str):
                 price_new = evt.get('price_new')
                 date_from = evt.get('price_date_from') or ''
                 contact = evt.get('price_contact') or ''
-                qty_pallet = evt.get('price_qty_per_pallet') or 0
-                try:
-                    qty_pallet = int(float(qty_pallet)) if qty_pallet else 0
-                except (ValueError, TypeError):
-                    qty_pallet = 0
+                qty_pallet = str(evt.get('price_qty_per_pallet') or '').strip()
                 if client and product and price_new is not None:
                     ok, msg = _apply_price_change(client, product, float(price_new), date_from, contact, qty_pallet)
                     status = '✅' if ok else '⚠️'
@@ -3118,8 +3121,10 @@ def _run_self_test():
             product = evt.get('price_product') or '—'
             new_price = evt.get('price_new') or '—'
             date_from = evt.get('price_date_from') or ''
+            contact = evt.get('price_contact') or ''
             date_str = f' с {date_from}' if date_from else ''
-            lines.append(f'💰 Цена: {client} → {product} = {new_price} руб.{date_str}')
+            contact_str = f' ({contact})' if contact else ''
+            lines.append(f'💰 Цена: {client}{contact_str} → {product} = {new_price} руб.{date_str}')
         elif etype == 'object_add':
             obj = evt.get('object_name') or '—'
             lines.append(f'🏗 Объект: «{obj}» для {client}')
