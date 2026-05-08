@@ -2466,7 +2466,7 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
         price_data = ws.get("AF7:AK200")
 
         last_filled_row = 6  # строка 7 = первая строка данных
-        found_qty = 0  # шт/пдн из предыдущих записей
+        found_qty = ""  # шт/пдн из предыдущих записей (строка, может быть "72/75")
         product_upper = product.upper().strip() if product else ""
         for i, row in enumerate(price_data, 7):
             if row and any(str(c).strip() for c in row):
@@ -2476,15 +2476,12 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
                     row_product = str(row[2]).upper().strip() if len(row) > 2 else ""
                     row_qty = str(row[3]).strip() if len(row) > 3 else ""
                     if product_upper and product_upper in row_product and row_qty:
-                        try:
-                            found_qty = int(float(row_qty))
-                        except (ValueError, TypeError):
-                            pass
+                        found_qty = row_qty
 
         price_date = date_from if date_from else datetime.date.today().strftime("%d.%m.%Y")
 
         # Определяем шт/пдн: из аргумента, или из предыдущих записей
-        final_qty = qty_per_pallet if qty_per_pallet else found_qty
+        final_qty = str(qty_per_pallet) if qty_per_pallet else found_qty
 
         # Проверяем: может последняя строка — тот же продукт+цена, но AG пустой?
         # Если да — дописываем в неё (не создаём дубль)
