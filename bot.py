@@ -2477,13 +2477,45 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
                         except (ValueError, TypeError):
                             pass
 
-        new_row = last_filled_row + 1
         price_date = date_from if date_from else datetime.date.today().strftime("%d.%m.%Y")
 
         # Определяем шт/пдн: из аргумента, или из предыдущих записей
         final_qty = qty_per_pallet if qty_per_pallet else found_qty
 
-        # Записываем новую строку цены (все 5 колонок)
+        # Проверяем: может последняя строка — тот же продукт+цена, но AG пустой?
+        # Если да — дописываем в неё (не создаём дубль)
+        update_existing = False
+        if last_filled_row >= 7 and price_data:
+            last_row_data = price_data[last_filled_row - 7] if (last_filled_row - 7) < len(price_data) else []
+            if last_row_data:
+                # AF-AK: [0]=дата, [1]=клиент, [2]=продукция, [3]=шт/пдн, [4]=цена
+                last_product = str(last_row_data[2]).upper().strip() if len(last_row_data) > 2 else ""
+                last_client = str(last_row_data[1]).strip() if len(last_row_data) > 1 else ""
+                last_price_val = str(last_row_data[4]).strip() if len(last_row_data) > 4 else ""
+                last_qty_val = str(last_row_data[3]).strip() if len(last_row_data) > 3 else ""
+                try:
+                    last_price_num = float(last_price_val.replace(",", ".")) if last_price_val else 0
+                except (ValueError, TypeError):
+                    last_price_num = 0
+                # Совпадает продукт и цена, но клиент не заполнен
+                if product_upper and product_upper in last_product and abs(last_price_num - new_price) < 0.01 and not last_client:
+                    update_existing = True
+                    print(f"[PRICE] Найдена существующая строка {last_filled_row} без клиента — дописываю", flush=True)
+
+        if update_existing:
+            target_row = last_filled_row
+            if contact_name:
+                ws.update_cell(target_row, COL_CLIENT, contact_name)
+            if final_qty and not last_qty_val:
+                ws.update_cell(target_row, COL_QTY, final_qty)
+            qty_info = f", {final_qty} шт/пдн" if final_qty else ""
+            contact_info = f" ({contact_name})" if contact_name else ""
+            msg = f"Дописано в '{ws.title}' строка {target_row}: клиент{contact_info}{qty_info}"
+            print(f"[PRICE] {msg}", flush=True)
+            return True, msg
+
+        # Новая строка
+        new_row = last_filled_row + 1
         ws.update_cell(new_row, COL_DATE, price_date)
         if contact_name:
             ws.update_cell(new_row, COL_CLIENT, contact_name)
