@@ -2130,12 +2130,16 @@ def _dedup_check(event: dict) -> bool:
     key_parts = [
         event.get('type') or '',
         event.get('client') or '',
-        event.get('product') or '',
-        str(event.get('price') or ''),
+        event.get('product') or event.get('price_product') or '',
+        str(event.get('price') or event.get('price_new') or ''),
         event.get('driver') or '',
         event.get('truck') or '',
         event.get('from_location') or '',
         event.get('to_location') or '',
+        event.get('price_contact') or '',
+        event.get('price_date_from') or '',
+        event.get('object_name') or '',
+        str(event.get('payment_amount') or ''),
     ]
     h = hashlib.md5('|'.join(key_parts).lower().encode()).hexdigest()
     if h in _dedup_cache:
