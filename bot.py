@@ -2226,6 +2226,8 @@ def _parse_blok_plan_claude(text: str) -> list:
 - price_old: старая цена (для type=price)
 - price_new: новая цена (для type=price)
 - price_date_from: дата начала действия цены (для type=price), формат ДД.ММ.ГГГГ
+- price_contact: контактное лицо / кому именно цена (для type=price), напр. "ИП Шубина", "Иванов"
+- price_qty_per_pallet: количество штук на поддоне (для type=price), число или null
 - object_name: название объекта (для type=object_add), напр. "Литер 7"
 - payment_type: тип оплаты "нал" или "безнал" (для type=payment_info)
 - payment_amount: сумма оплаты в рублях (число, для type=payment_info)
@@ -2238,6 +2240,10 @@ def _parse_blok_plan_claude(text: str) -> list:
 
 "Надо добавить в КонтинентИнвест в Объекты Литер 7 и Литер 11"
 → [{{"type":"object_add","client":"КонтинентИнвест","object_name":"Литер 7"}},{{"type":"object_add","client":"КонтинентИнвест","object_name":"Литер 11"}}]
+
+"ЧАСТНИКИ, добавить цену ИП Шубина, Блок 390х190х188 /3, 48 руб"
+→ [{{"type":"price","client":"ЧАСТНИКИ","price_contact":"ИП Шубина","price_product":"Блок 390х190х188 /3","price_new":48.0}}]
+
 
 "Клиент: ИП Горячкина  Оплата: нал"
 → [{{"type":"client_add","client":"ИП Горячкина","payment_type":"нал"}}]
@@ -2297,6 +2303,12 @@ def _parse_blok_plan_claude(text: str) -> list:
                 evt['payment_method'] = evt.pop('method')
             if 'sum' in evt and 'payment_amount' not in evt:
                 evt['payment_amount'] = evt.pop('sum')
+            if 'contact' in evt and 'price_contact' not in evt and evt.get('type') == 'price':
+                evt['price_contact'] = evt.pop('contact')
+            if 'contact_name' in evt and 'price_contact' not in evt and evt.get('type') == 'price':
+                evt['price_contact'] = evt.pop('contact_name')
+            if 'qty_per_pallet' in evt and 'price_qty_per_pallet' not in evt:
+                evt['price_qty_per_pallet'] = evt.pop('qty_per_pallet')
         return events
     except Exception as e:
         print(f"[BLOK_PARSE] Ошибка: {e}", flush=True)
@@ -2390,7 +2402,7 @@ def _write_trips_to_sheets(trips: list):
 
 
 
-def _apply_price_change(client_name: str, product: str, new_price: float, date_from: str = ""):
+def _apply_price_change(client_name: str, product: str, new_price: float, date_from: str = "", contact_name: str = "", qty_per_pallet: int = 0):
     """Добавляет новую цену в секцию 'Контактное лицо' листа клиента.
 
     Секция расположена в колонках AF-AK:
@@ -2398,6 +2410,7 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
 
     НЕ трогает колонку H (цены в продажах) — там исторические данные.
     Добавляет новую строку после последней заполненной в секции.
+    Если qty_per_pallet не указан — ищет в предыдущих записях для этого продукта.
     """
     if not GOOGLE_SA_B64:
         print("[PRICE] GOOGLE_SA_B64 не задан", flush=True)
@@ -2440,26 +2453,48 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
         # Секция «Контактное лицо» в колонках AF-AK (1-based: 32-37)
         # AF=32(дата), AG=33(клиент), AH=34(продукция), AI=35(шт/пдн), AJ=36(руб/шт), AK=37(примечания)
         COL_DATE = 32    # AF
+        COL_CLIENT = 33  # AG
         COL_PRODUCT = 34 # AH
+        COL_QTY = 35     # AI
         COL_PRICE = 36   # AJ
 
-        # Читаем секцию для поиска последней заполненной строки
-        price_data = ws.get("AH7:AJ200")
+        # Читаем секцию AF-AK для поиска последней заполненной строки и предыдущих данных
+        price_data = ws.get("AF7:AK200")
 
         last_filled_row = 6  # строка 7 = первая строка данных
+        found_qty = 0  # шт/пдн из предыдущих записей
+        product_upper = product.upper().strip() if product else ""
         for i, row in enumerate(price_data, 7):
             if row and any(str(c).strip() for c in row):
                 last_filled_row = i
+                # Ищем шт/пдн для такого же продукта в предыдущих записях
+                if not qty_per_pallet and len(row) >= 4:
+                    row_product = str(row[2]).upper().strip() if len(row) > 2 else ""
+                    row_qty = str(row[3]).strip() if len(row) > 3 else ""
+                    if product_upper and product_upper in row_product and row_qty:
+                        try:
+                            found_qty = int(float(row_qty))
+                        except (ValueError, TypeError):
+                            pass
 
         new_row = last_filled_row + 1
         price_date = date_from if date_from else datetime.date.today().strftime("%d.%m.%Y")
 
-        # Записываем новую строку цены
+        # Определяем шт/пдн: из аргумента, или из предыдущих записей
+        final_qty = qty_per_pallet if qty_per_pallet else found_qty
+
+        # Записываем новую строку цены (все 5 колонок)
         ws.update_cell(new_row, COL_DATE, price_date)
+        if contact_name:
+            ws.update_cell(new_row, COL_CLIENT, contact_name)
         ws.update_cell(new_row, COL_PRODUCT, product)
+        if final_qty:
+            ws.update_cell(new_row, COL_QTY, final_qty)
         ws.update_cell(new_row, COL_PRICE, new_price)
 
-        msg = f"Цена добавлена в '{ws.title}' строка {new_row}: {product} = {new_price} руб. с {price_date}"
+        qty_info = f", {final_qty} шт/пдн" if final_qty else ""
+        contact_info = f" ({contact_name})" if contact_name else ""
+        msg = f"Цена добавлена в '{ws.title}' строка {new_row}: {product} = {new_price} руб.{qty_info}{contact_info} с {price_date}"
         print(f"[PRICE] {msg}", flush=True)
         return True, msg
 
@@ -2608,8 +2643,14 @@ def _confirm_accounting_events(events: list, sender_name: str):
                 product = evt.get('price_product') or ''
                 price_new = evt.get('price_new')
                 date_from = evt.get('price_date_from') or ''
+                contact = evt.get('price_contact') or ''
+                qty_pallet = evt.get('price_qty_per_pallet') or 0
+                try:
+                    qty_pallet = int(float(qty_pallet)) if qty_pallet else 0
+                except (ValueError, TypeError):
+                    qty_pallet = 0
                 if client and product and price_new is not None:
-                    ok, msg = _apply_price_change(client, product, float(price_new), date_from)
+                    ok, msg = _apply_price_change(client, product, float(price_new), date_from, contact, qty_pallet)
                     status = '✅' if ok else '⚠️'
                     send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
             elif evt.get('type') == 'payment_info':
