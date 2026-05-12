@@ -3125,7 +3125,13 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
         "запланирован", "на завтра", "на понедельник", "на вторник", "на среду",
         "на четверг", "на пятницу", "на субботу", "на следующ",
     )
-    if any(pm in text_lower for pm in plan_markers):
+    # Маркеры выполнения — если они есть, это ФАКТ, не план
+    fact_markers = (
+        "выполнен", "доставлен", "отгружен", "загружен", "разгрузил",
+        "привёз", "привез", "отгрузил", "рейс выполн", "рейсы выполн",
+    )
+    has_fact = any(fm in text_lower for fm in fact_markers)
+    if any(pm in text_lower for pm in plan_markers) and not has_fact:
         print(f"[BLOK_GROUP] ПЛАН — игнорируем: {text[:80]}", flush=True)
         return  # Это план, не факт — не обрабатываем
 
