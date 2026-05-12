@@ -2732,6 +2732,8 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
 
         # Возврат поддонов = оплата бартером → вносим в секцию ОПЛАТА
         # O=15(дата), P=16(ООО), Q=17(ИП), R=18(Нал), S=19, T=20(примечание), U=21(сумма), V=22(тип)
+        # Галочка получателя: читаем из "Условия работы" (ячейка AG4)
+        # "Поддоны выставляем за нал" → Нал, "от ИП" → ИП, "от ООО" → ООО
         try:
             pay_dates = ws.get("O8:O150")
             pay_row = 8
@@ -2744,15 +2746,39 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
             else:
                 pay_row = len(pay_dates) + 8
 
+            # Определяем получателя из условий работы клиента (AG4)
+            is_ooo = False
+            is_ip = False
+            is_nal = False
+            try:
+                conditions = ws.acell("AG4").value or ""
+                cond_lower = conditions.lower()
+                # Ищем "поддоны выставляем за/от ..."
+                if "поддон" in cond_lower:
+                    if "за нал" in cond_lower or "наличн" in cond_lower:
+                        is_nal = True
+                    elif "от ип" in cond_lower or "за ип" in cond_lower:
+                        is_ip = True
+                    elif "от ооо" in cond_lower or "за ооо" in cond_lower:
+                        is_ooo = True
+                    else:
+                        is_nal = True  # по умолчанию нал
+                else:
+                    is_nal = True  # нет условий — нал по умолчанию
+                print(f"[RETURN] Условия: {conditions[:80]} → {'Нал' if is_nal else 'ИП' if is_ip else 'ООО'}", flush=True)
+            except Exception:
+                is_nal = True  # fallback
+
             ws.update_cell(pay_row, 15, ret_date)       # O = дата
-            ws.update_cell(pay_row, 16, False)           # P = ООО
-            ws.update_cell(pay_row, 17, False)           # Q = ИП
-            ws.update_cell(pay_row, 18, False)           # R = Нал
+            ws.update_cell(pay_row, 16, is_ooo)          # P = ООО
+            ws.update_cell(pay_row, 17, is_ip)            # Q = ИП
+            ws.update_cell(pay_row, 18, is_nal)           # R = Нал
             ws.update_cell(pay_row, 20, "возврат поддонов")  # T = примечание
             ws.update_cell(pay_row, 21, barter_sum)      # U = сумма
             ws.update_cell(pay_row, 22, "Бартер")        # V = тип
-            msg += f"\n+ Оплата бартер: {barter_sum} руб. (строка {pay_row})"
-            print(f"[RETURN] Оплата бартер: {barter_sum} руб. в строку {pay_row}", flush=True)
+            checkbox = "ООО" if is_ooo else ("ИП" if is_ip else "Нал")
+            msg += f"\n+ Оплата бартер: {barter_sum} руб. ({checkbox}, строка {pay_row})"
+            print(f"[RETURN] Оплата бартер: {barter_sum} руб. ({checkbox}) в строку {pay_row}", flush=True)
         except Exception as pe:
             msg += f"\n⚠️ Возврат записан, но оплату-бартер не удалось: {pe}"
             print(f"[RETURN] Ошибка оплаты-бартер: {pe}", flush=True)
