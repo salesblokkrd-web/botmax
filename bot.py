@@ -2726,8 +2726,37 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
         # Сумма — формула
         ws.update_acell(f"AD{empty_row}", f"=AB{empty_row}*AC{empty_row}")
 
+        barter_sum = return_pallets * 550
         msg = f"Возврат поддонов записан в '{ws.title}' строка {empty_row}: {p_type} {return_pallets} шт от {ret_date}"
         print(f"[RETURN] {msg}", flush=True)
+
+        # Возврат поддонов = оплата бартером → вносим в секцию ОПЛАТА
+        # O=15(дата), P=16(ООО), Q=17(ИП), R=18(Нал), S=19, T=20(примечание), U=21(сумма), V=22(тип)
+        try:
+            pay_dates = ws.get("O8:O150")
+            pay_row = 8
+            for pi, pr in enumerate(pay_dates, 8):
+                if pr and str(pr[0]).strip():
+                    pay_row = pi + 1
+                else:
+                    pay_row = pi
+                    break
+            else:
+                pay_row = len(pay_dates) + 8
+
+            ws.update_cell(pay_row, 15, ret_date)       # O = дата
+            ws.update_cell(pay_row, 16, False)           # P = ООО
+            ws.update_cell(pay_row, 17, False)           # Q = ИП
+            ws.update_cell(pay_row, 18, False)           # R = Нал
+            ws.update_cell(pay_row, 20, "возврат поддонов")  # T = примечание
+            ws.update_cell(pay_row, 21, barter_sum)      # U = сумма
+            ws.update_cell(pay_row, 22, "Бартер")        # V = тип
+            msg += f"\n+ Оплата бартер: {barter_sum} руб. (строка {pay_row})"
+            print(f"[RETURN] Оплата бартер: {barter_sum} руб. в строку {pay_row}", flush=True)
+        except Exception as pe:
+            msg += f"\n⚠️ Возврат записан, но оплату-бартер не удалось: {pe}"
+            print(f"[RETURN] Ошибка оплаты-бартер: {pe}", flush=True)
+
         return True, msg
 
     except Exception as e:
