@@ -3134,8 +3134,7 @@ def _run_self_test():
     if not events:
         report = "❌ SELFTEST FAIL: Claude вернул пустой список"
         print(f"[SELFTEST] {report}", flush=True)
-        if OWNER_CHAT_ID:
-            send_msg(OWNER_CHAT_ID, report)
+        # НЕ отправляем владельцу — только в лог
         return
     
     # Построим подтверждение как в реальной обработке
@@ -3161,8 +3160,7 @@ def _run_self_test():
     
     report = f"✅ SELFTEST OK: {len(events)} событий\n" + "\n".join(lines)
     print(f"[SELFTEST] {report}", flush=True)
-    if OWNER_CHAT_ID:
-        send_msg(OWNER_CHAT_ID, f"🔧 {report}")
+    # НЕ отправляем владельцу — только в лог (по просьбе Алексея)
 
 
 def main():
