@@ -2333,6 +2333,9 @@ def _parse_blok_plan_claude(text: str) -> list:
                 evt['price_contact'] = evt.pop('contact_name')
             if 'qty_per_pallet' in evt and 'price_qty_per_pallet' not in evt:
                 evt['price_qty_per_pallet'] = evt.pop('qty_per_pallet')
+            # payment_date → date (нормализация для payment_info)
+            if 'payment_date' in evt and 'date' not in evt:
+                evt['date'] = evt.pop('payment_date')
         return events
     except Exception as e:
         print(f"[BLOK_PARSE] Ошибка: {e}", flush=True)
@@ -2383,9 +2386,10 @@ def _write_trips_to_sheets(trips: list):
                 p_type = trip.get("pallet_type") or ""
                 truck = trip.get("truck") or ""
                 obj = trip.get("to_location") or trip.get("from_location") or ""
+                contact = trip.get("price_contact") or trip.get("comment") or ""
                 if client and ret_qty:
                     try:
-                        ok, msg = _apply_pallet_return(client, int(ret_qty), p_type, ret_date, truck, obj)
+                        ok, msg = _apply_pallet_return(client, int(ret_qty), p_type, ret_date, truck, obj, contact)
                         status = "✅" if ok else "⚠️"
                         send_msg(BLOK_GROUP_ID, f"{status} Sheets: {msg}")
                     except Exception as e:
@@ -2659,7 +2663,7 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
 
 
 def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str = "", 
-                          return_date: str = "", truck: str = "", obj: str = ""):
+                          return_date: str = "", truck: str = "", obj: str = "", contact_name: str = ""):
     """Записывает возврат поддонов в секцию ВОЗВРАТ ПОДДОНОВ (колонки X-AD) на листе клиента.
     
     X=дата, Y=№ а/м, Z=объект, AA=поддоны (тип), AB=кол-во, AC=цена, AD=сумма
@@ -2783,6 +2787,9 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
             ws.update_cell(pay_row, 18, is_nal)           # R = Нал
             ws.update_cell(pay_row, 20, "возврат поддонов")  # T = примечание
             ws.update_cell(pay_row, 21, barter_sum)      # U = сумма
+            # S = подклиент (для ЧАСТНИКИ — ИП Шубина и т.п.)
+            if contact_name:
+                ws.update_cell(pay_row, 19, contact_name)  # S = клиент
             ws.update_cell(pay_row, 22, "Бартер")        # V = тип
             checkbox = "ООО" if is_ooo else ("ИП" if is_ip else "Нал")
             msg += f"\n+ Оплата бартер: {barter_sum} руб. ({checkbox}, строка {pay_row})"
@@ -2797,6 +2804,72 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
         msg = f"Ошибка: {e}"
         print(f"[RETURN] {msg}", flush=True)
         return False, msg
+
+
+def _apply_object_add(client_name: str, object_name: str):
+    """Добавляет объект в справочник клиента (колонка AM)."""
+    if not GOOGLE_SA_B64:
+        return False, "Нет доступа к Google Sheets"
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+
+        # Ищем лист клиента
+        ws = None
+        client_upper = client_name.upper().strip()
+        for sheet in sh.worksheets():
+            if sheet.title.upper().strip() == client_upper:
+                ws = sheet
+                break
+        if not ws:
+            for sheet in sh.worksheets():
+                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
+                    ws = sheet
+                    break
+        if not ws:
+            return False, f"Лист '{client_name}' не найден"
+
+        print(f"[OBJ_ADD] Нашёл лист: '{ws.title}'", flush=True)
+
+        # Справочник объектов в колонке AM (39)
+        COL_OBJ = 39  # AM
+        obj_data = ws.get("AM8:AM50")
+        # Проверяем дубликат
+        for row in obj_data:
+            if row and str(row[0]).strip().upper() == object_name.strip().upper():
+                msg = f"Объект '{object_name}' уже есть в '{ws.title}'"
+                print(f"[OBJ_ADD] {msg}", flush=True)
+                return True, msg
+
+        # Ищем первую пустую строку
+        empty_row = 8
+        for i, row in enumerate(obj_data, 8):
+            if row and str(row[0]).strip():
+                empty_row = i + 1
+            else:
+                empty_row = i
+                break
+        else:
+            empty_row = len(obj_data) + 8
+
+        ws.update_cell(empty_row, COL_OBJ, object_name)
+        msg = f"Объект '{object_name}' добавлен в '{ws.title}' строка {empty_row}"
+        print(f"[OBJ_ADD] {msg}", flush=True)
+        return True, msg
+
+    except Exception as e:
+        msg = f"Ошибка: {e}"
+        print(f"[OBJ_ADD] {msg}", flush=True)
+        return False, msg
+
 
 def _apply_payment_edit(client_name: str, contact_name: str, edit_date: str = ""):
     """Находит оплату по дате на листе клиента и вписывает клиента/контакт в колонку S.
@@ -2952,6 +3025,15 @@ def _confirm_accounting_events(events: list, sender_name: str):
                 edit_date = evt.get('date') or ''
                 if client and (contact or edit_date):
                     ok, msg = _apply_payment_edit(client, contact, edit_date)
+                    status = '✅' if ok else '⚠️'
+                    send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
+
+            elif evt.get('type') == 'object_add':
+                # Добавление объекта в справочник клиента (AM)
+                client = evt.get('client') or ''
+                obj_name = evt.get('object_name') or ''
+                if client and obj_name:
+                    ok, msg = _apply_object_add(client, obj_name)
                     status = '✅' if ok else '⚠️'
                     send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
 
