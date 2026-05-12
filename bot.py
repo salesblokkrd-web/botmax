@@ -2369,20 +2369,25 @@ def _write_trips_to_sheets(trips: list):
                 last_num -= 1  # откатываем счётчик
                 continue
             elif evt_type == "return":
-                # Возврат поддонов
-                ret_info = f"ВОЗВРАТ поддонов: {trip.get('return_pallets') or ''} шт"
-                if trip.get("pallet_type"):
-                    ret_info += f" ({trip.get('pallet_type')})"
-                row = [
-                    str(last_num),
-                    trip.get("date") or datetime.date.today().strftime("%d.%m.%Y"),
-                    trip.get("truck") or "",
-                    trip.get("driver") or "",
-                    trip.get("from_location") or "",
-                    trip.get("to_location") or "",
-                    trip.get("client") or "",
-                    ret_info,
-                ]
+                # Возврат поддонов → пишем в секцию ВОЗВРАТ на листе клиента, НЕ в Рейсы
+                last_num -= 1  # откатываем счётчик — возврат не считается рейсом
+                client = trip.get("client") or ""
+                ret_qty = trip.get("return_pallets") or trip.get("pallets") or 0
+                ret_date = trip.get("date") or datetime.date.today().strftime("%d.%m.%Y")
+                p_type = trip.get("pallet_type") or ""
+                truck = trip.get("truck") or ""
+                obj = trip.get("to_location") or trip.get("from_location") or ""
+                if client and ret_qty:
+                    try:
+                        ok, msg = _apply_pallet_return(client, int(ret_qty), p_type, ret_date, truck, obj)
+                        status = "✅" if ok else "⚠️"
+                        send_msg(BLOK_GROUP_ID, f"{status} Sheets: {msg}")
+                    except Exception as e:
+                        send_msg(BLOK_GROUP_ID, f"⚠️ Ошибка записи возврата: {e}")
+                        print(f"[BLOK_SHEETS] Ошибка возврата: {e}", flush=True)
+                else:
+                    send_msg(BLOK_GROUP_ID, f"⚠️ Возврат: не указан клиент или кол-во поддонов")
+                continue  # НЕ пишем в Рейсы
             else:
                 # Рейс — формат продукции: "20(3-0)" или "20(3-0)+9(2-0)"
                 # Парсер возвращает product в правильном формате, pallets уже внутри
@@ -2643,6 +2648,92 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
         print(f"[PAYMENT] {msg}", flush=True)
         return False, msg
 
+
+
+def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str = "", 
+                          return_date: str = "", truck: str = "", obj: str = ""):
+    """Записывает возврат поддонов в секцию ВОЗВРАТ ПОДДОНОВ (колонки X-AD) на листе клиента.
+    
+    X=дата, Y=№ а/м, Z=объект, AA=поддоны (тип), AB=кол-во, AC=цена, AD=сумма
+    """
+    if not GOOGLE_SA_B64:
+        return False, "Нет доступа к Google Sheets"
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+
+        # Ищем лист клиента
+        ws = None
+        client_upper = client_name.upper().strip()
+        for sheet in sh.worksheets():
+            if sheet.title.upper().strip() == client_upper:
+                ws = sheet
+                break
+        if not ws:
+            for sheet in sh.worksheets():
+                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
+                    ws = sheet
+                    break
+        if not ws:
+            return False, f"Лист '{client_name}' не найден"
+
+        print(f"[RETURN] Нашёл лист: '{ws.title}'", flush=True)
+
+        # Секция ВОЗВРАТ ПОДДОНОВ: X=24, Y=25, Z=26, AA=27, AB=28, AC=29, AD=30
+        COL_DATE = 24    # X
+        COL_TRUCK = 25   # Y
+        COL_OBJ = 26     # Z
+        COL_PTYPE = 27   # AA (тип поддона)
+        COL_QTY = 28     # AB (кол-во)
+        COL_PRICE = 29   # AC (цена)
+        COL_SUM = 30     # AD (сумма = формула)
+
+        # Ищем первую пустую строку в секции X8:X100
+        ret_dates = ws.get("X8:X100")
+        empty_row = 8
+        for i, row in enumerate(ret_dates, 8):
+            if row and str(row[0]).strip():
+                empty_row = i + 1
+            else:
+                empty_row = i
+                break
+        else:
+            empty_row = len(ret_dates) + 8
+
+        ret_date = return_date if return_date else datetime.date.today().strftime("%d.%m.%Y")
+        # Определяем тип поддона
+        p_type = "Поддон"
+        if pallet_type:
+            if "узк" in pallet_type.lower() or "0.8" in pallet_type or "1*" in pallet_type:
+                p_type = "Поддон 1*"
+
+        ws.update_cell(empty_row, COL_DATE, ret_date)
+        if truck:
+            ws.update_cell(empty_row, COL_TRUCK, truck)
+        if obj:
+            ws.update_cell(empty_row, COL_OBJ, obj)
+        ws.update_cell(empty_row, COL_PTYPE, p_type)
+        ws.update_cell(empty_row, COL_QTY, return_pallets)
+        ws.update_cell(empty_row, COL_PRICE, 550)
+        # Сумма — формула
+        ws.update_acell(f"AD{empty_row}", f"=AB{empty_row}*AC{empty_row}")
+
+        msg = f"Возврат поддонов записан в '{ws.title}' строка {empty_row}: {p_type} {return_pallets} шт от {ret_date}"
+        print(f"[RETURN] {msg}", flush=True)
+        return True, msg
+
+    except Exception as e:
+        msg = f"Ошибка: {e}"
+        print(f"[RETURN] {msg}", flush=True)
+        return False, msg
 
 def _confirm_accounting_events(events: list, sender_name: str):
     """Отправляет подтверждение по бухгалтерским командам в группу."""
