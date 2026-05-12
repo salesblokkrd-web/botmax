@@ -2272,6 +2272,12 @@ def _parse_blok_plan_claude(text: str) -> list:
 "Оплатила организация МеликсетянТ на ИП 120000 руб"
 → [{{"type":"payment_info","client":"МеликсетянТ","payment_type":"безнал","payment_amount":120000,"payment_method":"ИП"}}]
 
+"Оплата ЧАСТНИКИ клиент Шубина на ИП 20.04.2026 176550 руб"
+→ [{{"type":"payment_info","client":"ЧАСТНИКИ","price_contact":"ИП Шубина","payment_type":"безнал","payment_amount":176550,"payment_method":"ИП","payment_date":"20.04.2026"}}]
+
+"Надо внести изменения в ЧАСТНИКИ оплата от 20.04.2026 г. клиент ИП Шубина"
+→ [{{"type":"client_edit","client":"ЧАСТНИКИ","price_contact":"ИП Шубина","date":"20.04.2026","comment":"ИП Шубина — изменение оплаты от 20.04.2026"}}]
+
 Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
 
 Текст:
@@ -2555,11 +2561,12 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
         print(f"[PRICE] {msg}", flush=True)
         return False, msg
 
-def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_method: str = "", payment_date: str = ""):
+def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_method: str = "", payment_date: str = "", contact_name: str = ""):
     """Записывает оплату в лист клиента, секция ОПЛАТА (колонки O-V).
     
     O = дата, P = ООО (checkbox), Q = ИП (checkbox), R = Нал (checkbox),
     S = клиент/объект, T = примечание, U = сумма, V = "Деньги"/"Бартер"
+    contact_name: подклиент (напр. "ИП Шубина" для листа ЧАСТНИКИ), пишется в S
     """
     if not GOOGLE_SA_B64:
         return False, "Нет доступа к Google Sheets"
@@ -2635,8 +2642,9 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
         ws.update_cell(empty_row, COL_NAL, True if is_nal else False)
         ws.update_cell(empty_row, COL_SUM, amount)
         ws.update_cell(empty_row, COL_TYPE, "Деньги")
-        # S (COL_CLIENT) имеет DataValidation ONE_OF_RANGE → $AM$8:$AM$149
-        # НЕ пишем сюда текстом — только если значение есть в справочнике AM
+        # S (COL_CLIENT) — подклиент/объект. Для ЧАСТНИКИ = "ИП Шубина" и т.п.
+        if contact_name:
+            ws.update_cell(empty_row, COL_CLIENT, contact_name)
 
         checkbox = "ООО" if is_ooo else ("ИП" if is_ip else "Нал")
         msg = f"Оплата записана в \'{ws.title}\' строка {empty_row}: {amount} руб. ({checkbox})"
@@ -2790,6 +2798,85 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
         print(f"[RETURN] {msg}", flush=True)
         return False, msg
 
+def _apply_payment_edit(client_name: str, contact_name: str, edit_date: str = ""):
+    """Находит оплату по дате на листе клиента и вписывает клиента/контакт в колонку S.
+    
+    Используется для команд типа: "Внести изменения в ЧАСТНИКИ оплата от 20.04 клиент ИП Шубина"
+    """
+    if not GOOGLE_SA_B64:
+        return False, "Нет доступа к Google Sheets"
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+
+        # Ищем лист клиента
+        ws = None
+        client_upper = client_name.upper().strip()
+        for sheet in sh.worksheets():
+            if sheet.title.upper().strip() == client_upper:
+                ws = sheet
+                break
+        if not ws:
+            for sheet in sh.worksheets():
+                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
+                    ws = sheet
+                    break
+        if not ws:
+            return False, f"Лист '{client_name}' не найден"
+
+        print(f"[PAY_EDIT] Нашёл лист: '{ws.title}'", flush=True)
+
+        # Ищем оплату по дате в колонке O (15)
+        COL_DATE = 15   # O
+        COL_CLIENT = 19 # S
+
+        # Читаем даты и клиентов
+        pay_data = ws.get("O8:S150")
+        found_rows = []
+        for i, row in enumerate(pay_data, 8):
+            if row and str(row[0]).strip():
+                row_date = str(row[0]).strip()
+                row_client = str(row[4]).strip() if len(row) > 4 else ""
+                # Сравниваем даты (формат может быть разный)
+                if edit_date and edit_date in row_date:
+                    found_rows.append((i, row_date, row_client))
+
+        if not found_rows:
+            return False, f"Оплата от {edit_date} не найдена в '{ws.title}'"
+
+        # Если несколько строк с этой датой — обновляем ту, где S пустой
+        updated = 0
+        for row_num, row_date, row_client in found_rows:
+            if not row_client:  # S пустой — заполняем
+                ws.update_cell(row_num, COL_CLIENT, contact_name)
+                updated += 1
+                print(f"[PAY_EDIT] Строка {row_num}: S = '{contact_name}'", flush=True)
+
+        if updated == 0:
+            # Все строки уже имеют клиента — обновляем первую найденную
+            row_num = found_rows[0][0]
+            ws.update_cell(row_num, COL_CLIENT, contact_name)
+            updated = 1
+            print(f"[PAY_EDIT] Строка {row_num}: S обновлён на '{contact_name}'", flush=True)
+
+        msg = f"Клиент '{contact_name}' записан в '{ws.title}' ({updated} строк от {edit_date})"
+        print(f"[PAY_EDIT] {msg}", flush=True)
+        return True, msg
+
+    except Exception as e:
+        msg = f"Ошибка: {e}"
+        print(f"[PAY_EDIT] {msg}", flush=True)
+        return False, msg
+
+
 def _confirm_accounting_events(events: list, sender_name: str):
     """Отправляет подтверждение по бухгалтерским командам в группу."""
     lines = []
@@ -2851,9 +2938,20 @@ def _confirm_accounting_events(events: list, sender_name: str):
                 amount = evt.get('payment_amount')
                 pay_type = evt.get('payment_type') or ''  # нал/безнал
                 pay_method = evt.get('payment_method') or ''  # ИП/ООО
-                evt_date = evt.get('date') or ''
+                evt_date = evt.get('date') or evt.get('payment_date') or ''
+                contact = evt.get('price_contact') or ''
                 if client and amount:
-                    ok, msg = _apply_payment(client, float(amount), pay_type, pay_method, evt_date)
+                    ok, msg = _apply_payment(client, float(amount), pay_type, pay_method, evt_date, contact)
+                    status = '✅' if ok else '⚠️'
+                    send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
+
+            elif evt.get('type') == 'client_edit':
+                # Обновление клиента в существующей оплате
+                client = evt.get('client') or ''
+                contact = evt.get('price_contact') or evt.get('comment') or ''
+                edit_date = evt.get('date') or ''
+                if client and (contact or edit_date):
+                    ok, msg = _apply_payment_edit(client, contact, edit_date)
                     status = '✅' if ok else '⚠️'
                     send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
 
