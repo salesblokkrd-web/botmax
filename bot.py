@@ -117,8 +117,6 @@ def product_genitive(name):
     """Возвращает название товара в родительном падеже."""
     return PRODUCT_GENITIVE.get(name, name)
 
-
-
 # Исправления ошибок распознавания Whisper для местных топонимов
 WHISPER_FIXES = {
     "лобинск": "Лабинск",
@@ -149,8 +147,6 @@ WHISPER_FIXES = {
     "эйске": "Ейске",
     "эйска": "Ейска",
 }
-
-
 # Русские числительные → цифры (для парсинга "две машины", "три тонны" и т.п.)
 WORD_NUMBERS = {
     "одн": 1, "одна": 1, "одну": 1, "одного": 1, "один": 1,
@@ -304,20 +300,14 @@ _save_lock = threading.Lock()          # защита записи bot_state.jso
 _voice_lock = threading.Lock()         # защита pending_voice
 _user_locks: dict = {}                 # chat_id -> Lock (один поток на пользователя)
 _user_locks_guard = threading.Lock()   # защита самого словаря _user_locks
-
-
 def get_user_lock(chat_id: int) -> threading.Lock:
     with _user_locks_guard:
         if chat_id not in _user_locks:
             _user_locks[chat_id] = threading.Lock()
         return _user_locks[chat_id]
-
-
 STATE_FILE = os.path.join(DATA_DIR, "bot_state.json")
 ANALYTICS_FILE = os.path.join(DATA_DIR, "analytics.json")
 ORDERS_FILE = os.path.join(DATA_DIR, "orders.json")
-
-
 def save_order(order: dict):
     """Дописывает заявку в orders.json (append-only)."""
     try:
@@ -325,8 +315,6 @@ def save_order(order: dict):
             f.write(json.dumps(order, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[ORDERS] Ошибка записи: {e}", flush=True)
-
-
 def load_orders(limit: int = 10) -> list:
     """Загружает последние N заявок."""
     orders = []
@@ -343,8 +331,6 @@ def load_orders(limit: int = 10) -> list:
     except FileNotFoundError:
         pass
     return orders[-limit:]
-
-
 def track_event(event: str, **kwargs):
     """Дописывает событие в analytics.json (append-only)."""
     record = {"ts": time.time(), "event": event, **kwargs}
@@ -353,8 +339,6 @@ def track_event(event: str, **kwargs):
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[ANALYTICS] Ошибка записи: {e}", flush=True)
-
-
 def load_analytics(days: int = 7) -> list:
     """Загружает события за последние N дней."""
     since = time.time() - days * 86400
@@ -374,8 +358,6 @@ def load_analytics(days: int = 7) -> list:
     except FileNotFoundError:
         pass
     return events
-
-
 def save_state():
     """Атомарно сохраняет состояние диалогов на диск (потокобезопасно)."""
     with _save_lock:
@@ -393,8 +375,6 @@ def save_state():
             os.replace(tmp, STATE_FILE)
         except Exception as e:
             print(f"[STATE] Ошибка сохранения: {e}", flush=True)
-
-
 def load_state():
     """Загружает состояние диалогов при старте."""
     try:
@@ -416,8 +396,6 @@ def load_state():
 # ─── Max Bot API ───────────────────────────────────────────────────────────
 
 BASE_URL = "https://botapi.max.ru"
-
-
 def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> dict:
     p = dict(params or {})
     p["access_token"] = TOKEN  # MAX API требует токен в query string
@@ -436,26 +414,6 @@ def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> 
     except Exception as e:
         print(f"[API] {method} /{endpoint} error: {e}", flush=True)
         return {}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def send_msg(chat_id: int, text: str, buttons=None) -> dict:
     """Отправить сообщение. buttons = [[{text, payload}, ...], ...] или None."""
     body = {"text": text}
@@ -468,10 +426,6 @@ def send_msg(chat_id: int, text: str, buttons=None) -> dict:
 def send_action(chat_id: int, action: str = "typing_on") -> dict:
     """Отправить индикатор действия (typing_on) в чат."""
     return _api("POST", f"chats/{chat_id}/actions", body={"action": action})
-
-
-
-
 def send_photo_msg(chat_id: int, photo_url: str, caption: str = "") -> dict:
     """Отправить изображение по URL."""
     body = {
@@ -479,8 +433,6 @@ def send_photo_msg(chat_id: int, photo_url: str, caption: str = "") -> dict:
         "attachments": [{"type": "image", "payload": {"url": photo_url}}]
     }
     return _api("POST", "messages", params={"chat_id": chat_id}, body=body)
-
-
 def answer_cb(callback_id: str, notification: str = "") -> dict:
     if not callback_id:
         return {}
@@ -489,20 +441,14 @@ def answer_cb(callback_id: str, notification: str = "") -> dict:
     result = _api("POST", "answers", params=params, body=body)
     print(f"[ANSWER_CB] notification={notification!r} result={result}", flush=True)
     return result
-
-
 def get_updates(marker=None, timeout: int = 30) -> dict:
     p = {"timeout": timeout}
     if marker is not None:
         p["marker"] = marker
     return _api("GET", "updates", params=p)
-
-
 def make_buttons(items: list) -> list:
     """Список строк → список рядов кнопок (одна кнопка в ряд)."""
     return [[{"type": "callback", "text": s, "payload": s}] for s in items]
-
-
 def edit_msg(message_id: str, text: str, buttons=None) -> dict:
     """Редактировать сообщение по message_id."""
     body = {"text": text}
@@ -514,8 +460,6 @@ def edit_msg(message_id: str, text: str, buttons=None) -> dict:
     result = _api("PUT", "messages", params={"message_id": message_id}, body=body)
     print(f"[EDIT_MSG] mid={message_id[:30]} result_ok={bool(result)}", flush=True)
     return result
-
-
 def _format_poll_text(question: str, options: list, votes: dict) -> str:
     """Форматирует текст опроса с текущими результатами."""
     total = sum(len(v) for v in votes.values())
@@ -530,8 +474,6 @@ def _format_poll_text(question: str, options: list, votes: dict) -> str:
         lines.append("")
     lines.append(f"Всего голосов: {total}")
     return "\n".join(lines)
-
-
 def send_poll(chat_id: int, question: str, options: list) -> str:
     """Отправляет опрос с inline-кнопками. Возвращает poll_id.
 
@@ -572,8 +514,6 @@ def send_poll(chat_id: int, question: str, options: list) -> str:
     print(f"[POLL] Создан {poll_id}: {question} ({len(options)} вариантов)", flush=True)
     _save_polls()
     return poll_id
-
-
 def handle_poll_vote(user_id: int, callback_id: str, payload: str, orig_msg: dict = None):
     """Обработка голоса в опросе. Multiple choice: toggle vote."""
     print(f"[POLL_VOTE] START user={user_id} payload={payload} cb={callback_id[:20]}...", flush=True)
@@ -645,8 +585,6 @@ def handle_poll_vote(user_id: int, callback_id: str, payload: str, orig_msg: dic
 
     edit_msg(poll["message_id"], text, buttons)
     _save_polls()
-
-
 # ─── Pydantic модели ───────────────────────────────────────────────────────
 
 class OrderItem(BaseModel):
@@ -667,8 +605,6 @@ class ContactsParsed(BaseModel):
     name: Optional[str] = None
     company: Optional[str] = None
     phone: Optional[str] = None
-
-
 # ─── Парсеры (идентично tg-bot) ───────────────────────────────────────────
 
 def parse_order_regex(text: str) -> OrderParsed:
@@ -730,8 +666,6 @@ def parse_order_regex(text: str) -> OrderParsed:
         if m:
             result.address = m.group(1).strip()
     return result
-
-
 def parse_order_groq(text: str) -> OrderParsed:
     products_list = ", ".join(PRODUCTS.keys())
     client = Groq(api_key=GROQ_API_KEY)
@@ -793,8 +727,6 @@ def parse_order_groq(text: str) -> OrderParsed:
         delivery=data.get("delivery"),
         address=data.get("address"),
     )
-
-
 def parse_order(text: str) -> OrderParsed:
     text = fix_whisper_typos(text)
     # Конвертируем "машины/рейсы" в тонны до отправки в LLM
@@ -810,8 +742,6 @@ def parse_order(text: str) -> OrderParsed:
         except Exception as e:
             print(f"[GROQ] parse failed: {e}, using regex")
     return parse_order_regex(text)
-
-
 def parse_contacts_groq(text: str) -> ContactsParsed:
     client = Groq(api_key=GROQ_API_KEY)
     response = client.chat.completions.create(
@@ -830,8 +760,6 @@ def parse_contacts_groq(text: str) -> ContactsParsed:
     raw = re.sub(r"```[a-z]*\n?", "", raw).strip("` \n")
     data = json.loads(raw)
     return ContactsParsed(name=data.get("name"), company=data.get("company"), phone=data.get("phone"))
-
-
 # ─── Геокодирование и маршрутизация ───────────────────────────────────────
 
 # Зона обслуживания: bounding box регионов (lat_min, lat_max, lon_min, lon_max)
@@ -953,8 +881,6 @@ def get_coords(address: str):
     except Exception as e:
         print(f"[GEOCODE] критическая ошибка: {e}", flush=True)
     return None
-
-
 def get_road_distance(origin, destination):
     if YANDEX_ROUTING_KEY:
         params = urllib.parse.urlencode({
@@ -988,8 +914,6 @@ def get_road_distance(origin, destination):
     except Exception as e:
         print(f"[ROUTING] OSRM ошибка: {e}")
     return None
-
-
 def parse_tons(text: str, product: str = None):
     m = re.search(r"(\d+[.,]?\d*)\s*(тонн\w*|тн\b|т\b|куб\w*|м[³3]|машин\w*|рейс\w*)", text)
     if m:
@@ -1003,8 +927,6 @@ def parse_tons(text: str, product: str = None):
         return val
     m = re.search(r"(\d+[.,]?\d*)", text)
     return float(m.group(1).replace(",", ".")) if m else None
-
-
 # ─── Голосовые сообщения ──────────────────────────────────────────────────
 
 def transcribe_voice_url(audio_url: str):
@@ -1039,8 +961,6 @@ def transcribe_voice_url(audio_url: str):
     except Exception as e:
         print(f"[VOICE] ошибка расшифровки: {e}", flush=True)
         return None
-
-
 # ─── Логика диалога ────────────────────────────────────────────────────────
 
 def try_parse_freeform(text: str, chat_id: int) -> bool:
@@ -1105,8 +1025,6 @@ def try_parse_freeform(text: str, chat_id: int) -> bool:
         except Exception:
             pass
     return found
-
-
 def build_confirm_summary(d: dict) -> str:
     """Краткое резюме заявки для шага подтверждения."""
     lines = []
@@ -1125,8 +1043,6 @@ def build_confirm_summary(d: dict) -> str:
         lines.append(f"  Компания: {d['company']}")
     lines.append(f"  Телефон: {d.get('phone', '—')}")
     return "\n".join(lines)
-
-
 FUNNEL_NAMES = {PRODUCT: "product", VOLUME: "volume", DELIVERY: "delivery", ADDRESS: "address", CONTACTS: "contacts", PHONE_ONLY: "phone", CONFIRM: "confirm"}
 
 def advance(chat_id: int) -> int:
@@ -1192,8 +1108,6 @@ def advance(chat_id: int) -> int:
     send_msg(chat_id, f"Проверьте заявку:\n\n{summary}\n\nВсё верно?", btns)
     track_event("funnel_step", chat_id=chat_id, step="confirm")
     return CONFIRM
-
-
 def finalize(chat_id: int):
     global MANAGER_CHAT_ID, OWNER_CHAT_ID
     d = user_data.get(chat_id, {})
@@ -1367,8 +1281,6 @@ def finalize(chat_id: int):
                 send_photo_msg(OWNER_CHAT_ID, map_url, f"Маршрут: {BASE_NAME} -> {address} (~{distance_km} км)")
             except Exception as e:
                 print(f"[MAP] Ошибка карты владельцу: {e}")
-
-
 # ─── Обработка сообщений ──────────────────────────────────────────────────
 
 def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = None):
@@ -1861,8 +1773,6 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
     if new_state >= 0:
         user_state[chat_id] = new_state
         track_event("funnel_step", chat_id=chat_id, step=FUNNEL_NAMES.get(new_state, str(new_state)))
-
-
 def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str, **kwargs):
     global processed_callbacks
     # Игнорируем повторные нажатия одной и той же кнопки
@@ -2064,8 +1974,6 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str, 
     answer_cb(callback_id)
     # Кнопки-варианты (продукт, доставка) — обрабатываем как текст
     handle_message(chat_id, payload, user_id=user_id)
-
-
 def process_update_safe(update: dict):
     """Обёртка: определяет chat_id и выполняет update под per-user lock."""
     utype = update.get("update_type")
@@ -2100,8 +2008,6 @@ def process_update_safe(update: dict):
     finally:
         if lock:
             lock.release()
-
-
 # ─── Мониторинг группы "Архиповский блок" ─────────────────────────────────
 
 def _debug_log_chat(chat_id: int, sender: str, text_preview: str):
@@ -2114,8 +2020,6 @@ def _debug_log_chat(chat_id: int, sender: str, text_preview: str):
             f.write(line)
     except Exception:
         pass
-
-
 
 def _dedup_check(event: dict) -> bool:
     """Проверяет, не было ли это событие уже обработано за последние 24ч.
@@ -2150,8 +2054,6 @@ def _dedup_check(event: dict) -> bool:
         return True
     _dedup_cache[h] = now
     return False
-
-
 def _normalize_truck(truck: str) -> str:
     """Раскрывает сокращения номеров машин: 135 → у135рх 193"""
     if not truck:
@@ -2165,8 +2067,6 @@ def _normalize_truck(truck: str) -> str:
         if short in truck_stripped and len(truck_stripped) < 10:
             return full
     return truck
-
-
 def _log_blok_message(sender_name: str, text: str, raw: dict):
     """Пишем сырое сообщение из группы в лог-файл для анализа формата."""
     log_path = os.path.join(DATA_DIR, "blok_group_log.jsonl")
@@ -2180,8 +2080,6 @@ def _log_blok_message(sender_name: str, text: str, raw: dict):
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     print(f"[BLOK_GROUP] {sender_name}: {text[:80]}", flush=True)
-
-
 _BLOCK_CATALOG = """
 КАТАЛОГ ПРОДУКЦИИ (бетонные блоки):
 
@@ -2200,8 +2098,6 @@ _BLOCK_CATALOG = """
 Примеры: "Блок 20 отсев 3,0", "Блок 9 керамзит 2,0", "Блок 12 отсев 2,0"
 Если наполнитель неизвестен: "Блок 20 3,0". Если пустотность неизвестна: "Блок 20 отсев"
 """
-
-
 def _parse_blok_plan_claude(text: str) -> list:
     """Парсит план менеджера через Claude API. Возвращает список рейсов."""
     if not CLAUDE_API_KEY:
@@ -2261,8 +2157,6 @@ def _parse_blok_plan_claude(text: str) -> list:
 
 "ЧАСТНИКИ, добавить цену ИП Шубина, Блок 390х190х188 /3, 48 руб"
 → [{{"type":"price","client":"ЧАСТНИКИ","price_contact":"ИП Шубина","price_product":"Блок 390х190х188 /3","price_new":48.0}}]
-
-
 "Клиент: ИП Горячкина  Оплата: нал"
 → [{{"type":"client_add","client":"ИП Горячкина","payment_type":"нал"}}]
 
@@ -2340,8 +2234,6 @@ def _parse_blok_plan_claude(text: str) -> list:
     except Exception as e:
         print(f"[BLOK_PARSE] Ошибка: {e}", flush=True)
         return []
-
-
 def _write_trips_to_sheets(trips: list):
     """Записывает рейсы в лист 'Рейсы' Google Sheets через gspread."""
     if not trips or not GOOGLE_SA_B64:
@@ -2432,8 +2324,64 @@ def _write_trips_to_sheets(trips: list):
             print(f"[BLOK_SHEETS] Добавлен {evt_type}: {row}", flush=True)
     except Exception as e:
         print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
+def _apply_return_update(client_name: str, return_date: str, truck: str = "", obj: str = ""):
+    """Дописывает авто и объект в существующую запись возврата поддонов."""
+    if not GOOGLE_SA_B64:
+        return False, "Нет доступа к Google Sheets"
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_json = base64.b64decode(GOOGLE_SA_B64)
+        sa_info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+        ws = None
+        client_upper = client_name.upper().strip()
+        for sheet in sh.worksheets():
+            if sheet.title.upper().strip() == client_upper:
+                ws = sheet
+                break
+        if not ws:
+            for sheet in sh.worksheets():
+                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
+                    ws = sheet
+                    break
+        if not ws:
+            return False, f"Лист '{client_name}' не найден"
 
+        # Ищем строку с нужной датой в секции возврата (X8:X100)
+        ret_data = ws.get("X8:Z100")
+        target_row = None
+        for i, row in enumerate(ret_data, 8):
+            if row and str(row[0]).strip() == return_date:
+                # Нашли строку с этой датой — проверяем пустые авто/объект
+                cur_truck = row[1].strip() if len(row) > 1 and row[1] else ""
+                cur_obj = row[2].strip() if len(row) > 2 and row[2] else ""
+                if not cur_truck or not cur_obj:
+                    target_row = i
+                    break
+        if not target_row:
+            return False, f"Возврат от {return_date} в '{ws.title}' не найден или уже заполнен"
 
+        updated = []
+        if truck:
+            ws.update_cell(target_row, 25, truck)  # Y
+            updated.append(f"авто={truck}")
+        if obj:
+            ws.update_cell(target_row, 26, obj)  # Z
+            updated.append(f"объект={obj}")
+        if not updated:
+            return False, "Нечего обновлять — авто и объект не указаны"
+        msg = f"Возврат от {return_date} в '{ws.title}' строка {target_row}: дописано {', '.join(updated)}"
+        print(f"[RETURN_UPD] {msg}", flush=True)
+        return True, msg
+    except Exception as e:
+        print(f"[RETURN_UPD] Ошибка: {e}", flush=True)
+        return False, str(e)
 
 def _apply_price_change(client_name: str, product: str, new_price: float, date_from: str = "", contact_name: str = "", qty_per_pallet: str = ""):
     """Добавляет новую цену в секцию 'Контактное лицо' листа клиента.
@@ -2660,8 +2608,6 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
         print(f"[PAYMENT] {msg}", flush=True)
         return False, msg
 
-
-
 def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str = "", 
                           return_date: str = "", truck: str = "", obj: str = "", contact_name: str = ""):
     """Записывает возврат поддонов в секцию ВОЗВРАТ ПОДДОНОВ (колонки X-AD) на листе клиента.
@@ -2804,8 +2750,6 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
         msg = f"Ошибка: {e}"
         print(f"[RETURN] {msg}", flush=True)
         return False, msg
-
-
 def _apply_object_add(client_name: str, object_name: str):
     """Добавляет объект в справочник клиента (колонка AM)."""
     if not GOOGLE_SA_B64:
@@ -2869,8 +2813,6 @@ def _apply_object_add(client_name: str, object_name: str):
         msg = f"Ошибка: {e}"
         print(f"[OBJ_ADD] {msg}", flush=True)
         return False, msg
-
-
 def _apply_payment_edit(client_name: str, contact_name: str, edit_date: str = ""):
     """Находит оплату по дате на листе клиента и вписывает клиента/контакт в колонку S.
     
@@ -2948,8 +2890,6 @@ def _apply_payment_edit(client_name: str, contact_name: str, edit_date: str = ""
         msg = f"Ошибка: {e}"
         print(f"[PAY_EDIT] {msg}", flush=True)
         return False, msg
-
-
 def _confirm_accounting_events(events: list, sender_name: str):
     """Отправляет подтверждение по бухгалтерским командам в группу."""
     lines = []
@@ -3021,11 +2961,37 @@ def _confirm_accounting_events(events: list, sender_name: str):
                     send_msg(BLOK_GROUP_ID, f'⚠️ Оплата {client}: не указана сумма. Напишите сумму оплаты.')
 
             elif evt.get('type') == 'client_edit':
-                # Обновление клиента в существующей оплате
                 client = evt.get('client') or ''
                 contact = evt.get('price_contact') or evt.get('comment') or ''
                 edit_date = evt.get('date') or ''
-                if client and (contact or edit_date):
+                comment = evt.get('comment') or ''
+                # Проверяем: это дополнение к возврату поддонов?
+                comment_lower = comment.lower()
+                if 'возврат' in comment_lower and ('поддон' in comment_lower or 'а/м' in comment_lower or 'объект' in comment_lower):
+                    # Извлекаем авто и объект из комментария
+                    import re as _re
+                    truck_m = _re.search(r'а/м\s+([а-яА-Яa-zA-Z0-9]+\s*\d+)', comment)
+                    truck = truck_m.group(1).strip() if truck_m else ''
+                    # Нормализуем номер машины
+                    if truck:
+                        truck_upper = truck.upper()
+                        for short, full in TRUCK_SHORTCUTS.items():
+                            if short in truck_upper:
+                                truck = full
+                                break
+                        else:
+                            for valid in VALID_TRUCKS:
+                                if truck_upper.replace(' ', '') in valid.upper().replace(' ', ''):
+                                    truck = valid
+                                    break
+                    obj_m = _re.search(r'[Оо]бъект\s+(.+?)(?:$|,|\.|\\n)', comment)
+                    if client and edit_date and (truck or obj):
+                        ok, msg = _apply_return_update(client, edit_date, truck, obj)
+                        status = '✅' if ok else '⚠️'
+                        send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
+                    else:
+                        send_msg(BLOK_GROUP_ID, f'⚠️ Дополнение к возврату {client}: не удалось извлечь авто/объект из сообщения')
+                elif client and (contact or edit_date):
                     ok, msg = _apply_payment_edit(client, contact, edit_date)
                     status = '✅' if ok else '⚠️'
                     send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
@@ -3043,8 +3009,6 @@ def _confirm_accounting_events(events: list, sender_name: str):
         acct_only = [e for e in events if e.get('type') not in ('trip', 'return')]
         if acct_only:
             _write_accounting_to_sheets(acct_only)
-
-
 def _write_accounting_to_sheets(events: list):
     """Записывает бухгалтерские команды в лист Бухгалтерия Google Sheets."""
     if not events or not GOOGLE_SA_B64:
@@ -3104,13 +3068,9 @@ def _write_accounting_to_sheets(events: list):
             print(f'[ACCOUNTING_SHEETS] Добавлено: {row}', flush=True)
     except Exception as e:
         print(f'[ACCOUNTING_SHEETS] Ошибка: {e}', flush=True)
-
-
 def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     """Основная точка входа для сообщений из группы производства."""
     _log_blok_message(sender_name, text, raw_msg)
-
-
     # Проверяем структурированные сообщения (#поддоны, #условия)
     if pallet_handler:
         pallet_result = pallet_handler.try_handle(text, sender_name)
@@ -3156,8 +3116,6 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
 
     # Показываем индикатор "печатает..." пока бот обрабатывает
     send_action(BLOK_GROUP_ID, "typing_on")
-
-
     trips = _parse_blok_plan_claude(text)
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
@@ -3185,8 +3143,6 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     non_trip_events = [t for t in trips if t.get('type') not in ('trip', 'return')]
     if non_trip_events:
         _confirm_accounting_events(non_trip_events, sender_name)
-
-
 def process_update(update: dict):
     utype = update.get("update_type")
     if utype == "message_created":
@@ -3260,8 +3216,6 @@ def process_update(update: dict):
             if not has_voice_att:
                 send_msg(chat_id, "Я понимаю текст и голосовые сообщения. Напишите или наговорите что вам нужно 🙂")
                 return
-
-
         if text:
             handle_message(chat_id, text, user_name, user_id=user_id)
 
@@ -3279,8 +3233,6 @@ def process_update(update: dict):
         chat_id = orig_msg.get("recipient", {}).get("chat_id") or user_chat_map.get(user_id) or user_id
         print(f"[CB] user_id={user_id} chat_id={chat_id} payload={payload!r}", flush=True)
         handle_callback(user_id, chat_id, callback_id, payload, orig_msg=orig_msg)
-
-
 # ─── Главный цикл ─────────────────────────────────────────────────────────
 
 # ─── Еженедельный отчёт ────────────────────────────────────────────────────
@@ -3345,8 +3297,6 @@ def build_weekly_report() -> str:
         f"Воронка:\n{funnel_str}\n\n"
         f"Топ товаров:\n{top_str}"
     )
-
-
 def _reset_checkpoint_if_needed():
     """Сбрасывает чекпоинт если GROUP_ID изменился."""
     checkpoint_path = os.path.join(DATA_DIR, "blok_checkpoint.json")
@@ -3371,8 +3321,6 @@ def _reset_checkpoint_if_needed():
                 json.dump(data, f)
     except FileNotFoundError:
         pass
-
-
 def _run_blok_import():
     """Запускает import_blok_history.py как подпроцесс."""
     import subprocess
@@ -3388,8 +3336,6 @@ def _run_blok_import():
         print(result.stdout[-800:], flush=True)
     if result.stderr:
         print(f"[BLOK_SYNC_ERR] {result.stderr[-300:]}", flush=True)
-
-
 def blok_sync_loop():
     """Фоновый тред: сразу при старте + каждые 4 часа (8, 12, 16, 20 МСК)."""
     last_run_key = None
@@ -3416,8 +3362,6 @@ def blok_sync_loop():
                 _run_blok_import()
         except Exception as e:
             print(f"[BLOK_SYNC] Ошибка: {e}", flush=True)
-
-
 def weekly_report_loop():
     """Фоновый тред: отправляет отчёт владельцу по воскресеньям в 20:00 МСК."""
     import datetime
@@ -3437,8 +3381,6 @@ def weekly_report_loop():
         except Exception as e:
             print(f"[WEEKLY] Ошибка: {e}", flush=True)
         time.sleep(1800)  # проверяем каждые 30 минут
-
-
 # ─── Прайс-лист ───────────────────────────────────────────────────────────
 
 def _format_price_list():
@@ -3457,8 +3399,6 @@ def _format_price_list():
     lines.append(f"🕐 {WORK_HOURS}")
     lines.append("\n💬 Для заказа напишите что вам нужно или /start")
     return "\n".join(lines)
-
-
 
 def _run_self_test():
     """Selftest при старте: парсим тестовое сообщение через Claude, отправляем результат owner."""
@@ -3496,8 +3436,6 @@ def _run_self_test():
     report = f"✅ SELFTEST OK: {len(events)} событий\n" + "\n".join(lines)
     print(f"[SELFTEST] {report}", flush=True)
     # НЕ отправляем владельцу — только в лог (по просьбе Алексея)
-
-
 def main():
     print("[STARTUP] Запуск...", flush=True)
     time.sleep(3)  # minimal delay for clean restart
@@ -3588,7 +3526,5 @@ def main():
                 import traceback
                 print(f"[ERROR] polling: {e}\n{traceback.format_exc()[:300]}", flush=True)
                 time.sleep(5)
-
-
 if __name__ == "__main__":
     main()
