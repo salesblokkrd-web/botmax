@@ -3017,6 +3017,8 @@ def _confirm_accounting_events(events: list, sender_name: str):
                     ok, msg = _apply_payment(client, float(amount), pay_type, pay_method, evt_date, contact)
                     status = '✅' if ok else '⚠️'
                     send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
+                elif client and not amount:
+                    send_msg(BLOK_GROUP_ID, f'⚠️ Оплата {client}: не указана сумма. Напишите сумму оплаты.')
 
             elif evt.get('type') == 'client_edit':
                 # Обновление клиента в существующей оплате
@@ -3159,6 +3161,7 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     trips = _parse_blok_plan_claude(text)
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
+        send_msg(BLOK_GROUP_ID, "⚠️ Не удалось разобрать сообщение. Попробуйте переформулировать или отправить каждую операцию отдельным сообщением.")
         return
 
     # Дедупликация — отсекаем повторные сообщения (Светлана повторяет 3-6 раз)
