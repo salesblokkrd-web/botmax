@@ -2477,11 +2477,15 @@ def _write_trips_to_sheets(trips: list):
                 trip_pallets = trip.get("pallets")
                 if trip_pallets:
                     try:
-                        # Если менеджер указал шт/подд — добавляем к product key для точного маппинга
-                        wh_product = product
+                        # Если менеджер указал шт/подд — добавляем к ПЕРВОМУ продукту для точного маппинга
                         _qpp = trip.get("qty_per_pallet")
-                        if _qpp:
+                        if _qpp and "+" in product:
+                            parts = product.split("+", 1)
+                            wh_product = f"{parts[0].strip()}/{_qpp}+{parts[1]}"
+                        elif _qpp:
                             wh_product = f"{product}/{_qpp}"
+                        else:
+                            wh_product = product
                         wh_ok, wh_msg = _apply_warehouse_shipment(
                             trip.get("from_location"),
                             wh_product,
