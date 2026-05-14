@@ -74,9 +74,25 @@ TRUCK_SHORTCUTS = {
     "638": "р638хн 123",
 }
 
-# Дедупликация: храним хеши последних обработанных событий
-_dedup_cache = {}  # {hash: timestamp} — TTL 24 часа
+# Дедупликация: персистентный кеш на диске (выживает перезапуск бота)
+_DEDUP_FILE = os.path.join(DATA_DIR, "dedup_cache.json")
 _DEDUP_TTL = 86400  # 24 часа в секундах
+
+def _load_dedup_cache() -> dict:
+    try:
+        with open(_DEDUP_FILE, 'r') as f:
+            return json.loads(f.read())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_dedup_cache(cache: dict):
+    try:
+        with open(_DEDUP_FILE, 'w') as f:
+            f.write(json.dumps(cache))
+    except Exception as e:
+        print(f"[DEDUP] Ошибка сохранения кеша: {e}", flush=True)
+
+_dedup_cache = _load_dedup_cache()
 
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 
@@ -2052,12 +2068,15 @@ def _dedup_check(event: dict) -> bool:
         str(event.get('payment_amount') or ''),
         event.get('payment_type') or '',
         event.get('payment_method') or '',
+        str(event.get('pallets') or ''),
+        str(event.get('return_pallets') or ''),
     ]
     h = hashlib.md5('|'.join(key_parts).lower().encode()).hexdigest()
     if h in _dedup_cache:
         print(f"[DEDUP] Дубликат отклонён: {key_parts}", flush=True)
         return True
     _dedup_cache[h] = now
+    _save_dedup_cache(_dedup_cache)
     return False
 def _normalize_truck(truck: str) -> str:
     """Раскрывает сокращения номеров машин: 135 → у135рх 193"""
