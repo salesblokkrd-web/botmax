@@ -2105,7 +2105,7 @@ _BLOCK_CATALOG = """
 Примеры: "Блок 20 отсев 3,0", "Блок 9 керамзит 2,0", "Блок 12 отсев 2,0"
 Если наполнитель неизвестен: "Блок 20 3,0". Если пустотность неизвестна: "Блок 20 отсев"
 """
-def _parse_blok_plan_claude(text: str) -> list:
+def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
     """Парсит план менеджера через Claude API. Возвращает список рейсов."""
     if not CLAUDE_API_KEY:
         return []
@@ -2133,7 +2133,7 @@ def _parse_blok_plan_claude(text: str) -> list:
 - type: "trip" (рейс/доставка), "return" (возврат поддонов), "price" (изменение цены),
         "client_add" (новый клиент), "client_edit" (изменение данных клиента),
         "object_add" (добавить объект клиенту), "payment_info" (информация об оплате)
-- date: дата ДД.ММ.ГГГГ (если не указана — сегодня {_today_msk()})
+- date: дата ДД.ММ.ГГГГ (если не указана — сегодня {msg_date or _today_msk()})
 - driver: ФИО водителя (из списка выше, по фамилии)
 - truck: гос.номер машины (из списка выше)
 - from_location: откуда ("Карьер", "КРД", название города)
@@ -3333,7 +3333,17 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
 
     # Показываем индикатор "печатает..." пока бот обрабатывает
     send_action(BLOK_GROUP_ID, "typing_on")
-    trips = _parse_blok_plan_claude(text)
+    # Извлекаем дату из timestamp сообщения (МСК) — точнее чем текущее время
+    _msg_ts = raw_msg.get("timestamp") or raw_msg.get("body", {}).get("timestamp")
+    if _msg_ts:
+        try:
+            _msg_dt = datetime.datetime.utcfromtimestamp(_msg_ts / 1000) + datetime.timedelta(hours=3)
+            _msg_date = _msg_dt.strftime("%d.%m.%Y")
+        except (ValueError, OSError, TypeError):
+            _msg_date = _today_msk()
+    else:
+        _msg_date = _today_msk()
+    trips = _parse_blok_plan_claude(text, msg_date=_msg_date)
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
         send_msg(BLOK_GROUP_ID, "⚠️ Не удалось разобрать сообщение. Попробуйте переформулировать или отправить каждую операцию отдельным сообщением.")
