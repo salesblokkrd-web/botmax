@@ -53,6 +53,11 @@ BASE_NAME = "Архиповский карьер (с. Архиповское, Б
 RATE_PER_TON_KM = 5
 WORK_HOURS = "пн–сб 8:00–18:00"
 
+def _today_msk() -> str:
+    """Возвращает сегодняшнюю дату по МСК (UTC+3) в формате ДД.ММ.ГГГГ."""
+    now_msk = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+    return now_msk.strftime("%d.%m.%Y")
+
 # ─── Группа производства "Архиповский блок" ───────────────────────────────
 BLOK_GROUP_ID = int(os.environ.get("BLOK_GROUP_ID", "-68840834804304"))  # Производство Тихорецкая
 GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")  # base64(service_account.json)
@@ -2076,9 +2081,11 @@ def _log_blok_message(sender_name: str, text: str, raw: dict):
         "text": text,
         "raw": raw,
     }
-    with threading.Lock():
+    try:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     print(f"[BLOK_GROUP] {sender_name}: {text[:80]}", flush=True)
 _BLOCK_CATALOG = """
 КАТАЛОГ ПРОДУКЦИИ (бетонные блоки):
@@ -2126,7 +2133,7 @@ def _parse_blok_plan_claude(text: str) -> list:
 - type: "trip" (рейс/доставка), "return" (возврат поддонов), "price" (изменение цены),
         "client_add" (новый клиент), "client_edit" (изменение данных клиента),
         "object_add" (добавить объект клиенту), "payment_info" (информация об оплате)
-- date: дата ДД.ММ.ГГГГ (если не указана — сегодня {datetime.date.today().strftime('%d.%m.%Y')})
+- date: дата ДД.ММ.ГГГГ (если не указана — сегодня {_today_msk()})
 - driver: ФИО водителя (из списка выше, по фамилии)
 - truck: гос.номер машины (из списка выше)
 - from_location: откуда ("Карьер", "КРД", название города)
@@ -2274,7 +2281,7 @@ def _write_trips_to_sheets(trips: list):
                 last_num -= 1  # откатываем счётчик — возврат не считается рейсом
                 client = trip.get("client") or ""
                 ret_qty = trip.get("return_pallets") or trip.get("pallets") or 0
-                ret_date = trip.get("date") or datetime.date.today().strftime("%d.%m.%Y")
+                ret_date = trip.get("date") or _today_msk()
                 p_type = trip.get("pallet_type") or ""
                 truck = trip.get("truck") or ""
                 obj = trip.get("to_location") or trip.get("from_location") or ""
@@ -2296,7 +2303,7 @@ def _write_trips_to_sheets(trips: list):
                 product = trip.get("product") or ""
                 row = [
                     str(last_num),
-                    trip.get("date") or datetime.date.today().strftime("%d.%m.%Y"),
+                    trip.get("date") or _today_msk(),
                     trip.get("truck") or "",
                     trip.get("driver") or "",
                     trip.get("from_location") or "",
@@ -2495,7 +2502,7 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
                     if product_upper and product_upper in row_product and row_qty:
                         found_qty = row_qty
 
-        price_date = date_from if date_from else datetime.date.today().strftime("%d.%m.%Y")
+        price_date = date_from if date_from else _today_msk()
 
         # Определяем шт/пдн: из аргумента, или из предыдущих записей
         final_qty = qty_per_pallet if qty_per_pallet else found_qty
@@ -2593,15 +2600,16 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
 
         # Ищем первую пустую строку в секции ОПЛАТА (O8:O150)
         payment_dates = ws.get("O8:O150")
-        empty_row = 8  # начало секции
+        empty_row = None
         for i, row in enumerate(payment_dates, 8):
-            if row and str(row[0]).strip():
-                empty_row = i + 1
-            else:
+            if not row or not str(row[0]).strip():
                 empty_row = i
                 break
-        else:
+        if empty_row is None:
             empty_row = len(payment_dates) + 8
+        if empty_row > 148:
+            return False, f"Секция ОПЛАТА переполнена в '{ws.title}' (строка {empty_row})"
+        print(f"[PAYMENT] Пустая строка: {empty_row}", flush=True)
 
         # Колонки: O=15, P=16(ООО), Q=17(ИП), R=18(Нал), S=19, T=20, U=21, V=22
         COL_DATE = 15   # O
@@ -2613,7 +2621,7 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
         COL_SUM = 21    # U
         COL_TYPE = 22   # V
 
-        today = payment_date if payment_date else datetime.date.today().strftime("%d.%m.%Y")
+        today = payment_date if payment_date else _today_msk()
 
         # Определяем куда ставить галочку
         # pay_type: "нал"/"безнал", pay_method: "ИП"/"ООО"
@@ -2696,17 +2704,18 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
 
         # Ищем первую пустую строку в секции X8:X100
         ret_dates = ws.get("X8:X100")
-        empty_row = 8
+        empty_row = None
         for i, row in enumerate(ret_dates, 8):
-            if row and str(row[0]).strip():
-                empty_row = i + 1
-            else:
+            if not row or not str(row[0]).strip():
                 empty_row = i
                 break
-        else:
+        if empty_row is None:
             empty_row = len(ret_dates) + 8
+        if empty_row > 98:
+            return False, f"Секция ВОЗВРАТ переполнена в '{ws.title}' (строка {empty_row})"
+        print(f"[RETURN] Пустая строка: {empty_row}", flush=True)
 
-        ret_date = return_date if return_date else datetime.date.today().strftime("%d.%m.%Y")
+        ret_date = return_date if return_date else _today_msk()
         # Определяем тип поддона
         p_type = "Поддон"
         if pallet_type:
@@ -2734,14 +2743,12 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
         # "Поддоны выставляем за нал" → Нал, "от ИП" → ИП, "от ООО" → ООО
         try:
             pay_dates = ws.get("O8:O150")
-            pay_row = 8
+            pay_row = None
             for pi, pr in enumerate(pay_dates, 8):
-                if pr and str(pr[0]).strip():
-                    pay_row = pi + 1
-                else:
+                if not pr or not str(pr[0]).strip():
                     pay_row = pi
                     break
-            else:
+            if pay_row is None:
                 pay_row = len(pay_dates) + 8
 
             # Определяем получателя из условий работы клиента (AG4)
@@ -3107,7 +3114,7 @@ def _write_accounting_to_sheets(events: list):
                     comment = ', '.join(parts) + (f'; {comment}' if comment else '')
             row = [
                 str(last_num),
-                evt.get('date') or datetime.date.today().strftime('%d.%m.%Y'),
+                evt.get('date') or _today_msk(),
                 evt.get('type') or '',
                 evt.get('client') or '',
                 product,
