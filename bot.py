@@ -2324,7 +2324,7 @@ def _write_trips_to_sheets(trips: list):
             print(f"[BLOK_SHEETS] Добавлен {evt_type}: {row}", flush=True)
     except Exception as e:
         print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
-def _apply_return_update(client_name: str, return_date: str, truck: str = "", obj: str = ""):
+def _apply_return_update(client_name: str, return_date: str, truck: str = "", obj: str = "", payment_type: str = ""):
     """Дописывает авто и объект в существующую запись возврата поддонов."""
     if not GOOGLE_SA_B64:
         return False, "Нет доступа к Google Sheets"
@@ -2374,8 +2374,48 @@ def _apply_return_update(client_name: str, return_date: str, truck: str = "", ob
         if obj:
             ws.update_cell(target_row, 26, obj)  # Z
             updated.append(f"объект={obj}")
+        # Обновляем тип оплаты в секции ОПЛАТА (O-V), если указан
+        if payment_type:
+            pay_type_lower = payment_type.lower()
+            is_nal = 'нал' in pay_type_lower and 'безнал' not in pay_type_lower
+            is_ip = 'ип' in pay_type_lower or 'безнал' in pay_type_lower
+            is_ooo = 'ооо' in pay_type_lower
+            # Ищем строку оплаты с этой датой и пометкой "возврат поддонов"
+            try:
+                pay_data = ws.get("O8:V150")
+                pay_row = None
+                for pi, pr in enumerate(pay_data, 8):
+                    if pr and str(pr[0]).strip() == return_date:
+                        note = pr[5].strip().lower() if len(pr) > 5 else ""
+                        if "возврат" in note or "бартер" in (pr[7].strip().lower() if len(pr) > 7 else ""):
+                            pay_row = pi
+                            break
+                        # Также проверяем колонку V (индекс 7 от O)
+                        v_val = pr[7].strip().lower() if len(pr) > 7 else ""
+                        if "бартер" in v_val:
+                            pay_row = pi
+                            break
+                if not pay_row:
+                    # Ищем просто по дате
+                    for pi, pr in enumerate(pay_data, 8):
+                        if pr and str(pr[0]).strip() == return_date:
+                            pay_row = pi
+                            break
+                if pay_row:
+                    ws.update_cell(pay_row, 16, is_ooo)   # P = ООО
+                    ws.update_cell(pay_row, 17, is_ip)     # Q = ИП
+                    ws.update_cell(pay_row, 18, is_nal)    # R = Нал
+                    label = "Нал" if is_nal else ("ИП" if is_ip else "ООО")
+                    updated.append(f"оплата={label} (строка оплаты {pay_row})")
+                    print(f"[RETURN_UPD] Тип оплаты изменён на {label} в строке {pay_row}", flush=True)
+                else:
+                    updated.append(f"оплата={payment_type} (строка оплаты не найдена)")
+            except Exception as pe:
+                updated.append(f"оплата: ошибка {pe}")
+                print(f"[RETURN_UPD] Ошибка обновления оплаты: {pe}", flush=True)
+
         if not updated:
-            return False, "Нечего обновлять — авто и объект не указаны"
+            return False, "Нечего обновлять — авто, объект и оплата не указаны"
         msg = f"Возврат от {return_date} в '{ws.title}' строка {target_row}: дописано {', '.join(updated)}"
         print(f"[RETURN_UPD] {msg}", flush=True)
         return True, msg
@@ -2967,7 +3007,7 @@ def _confirm_accounting_events(events: list, sender_name: str):
                 comment = evt.get('comment') or ''
                 # Проверяем: это дополнение к возврату поддонов?
                 comment_lower = comment.lower()
-                if 'возврат' in comment_lower and ('поддон' in comment_lower or 'а/м' in comment_lower or 'объект' in comment_lower):
+                if 'возврат' in comment_lower and ('поддон' in comment_lower or 'а/м' in comment_lower or 'объект' in comment_lower or 'наличк' in comment_lower or 'безнал' in comment_lower or 'нал' in comment_lower):
                     # Извлекаем авто и объект из комментария
                     import re as _re
                     truck_m = _re.search(r'а/м\s+([а-яА-Яa-zA-Z0-9]+\s*\d+)', comment)
@@ -2986,8 +3026,18 @@ def _confirm_accounting_events(events: list, sender_name: str):
                                     break
                     obj_m = _re.search(r'[Оо]бъект\s+(.+?)(?:$|,|\.|\\n)', comment)
                     obj = obj_m.group(1).strip() if obj_m else ''
-                    if client and edit_date and (truck or obj):
-                        ok, msg = _apply_return_update(client, edit_date, truck, obj)
+                    # Извлекаем тип оплаты
+                    pay_type = ''
+                    if 'наличк' in comment_lower or 'нал ' in comment_lower or comment_lower.endswith('нал') or 'на нал' in comment_lower:
+                        pay_type = 'нал'
+                    elif 'безнал' in comment_lower:
+                        pay_type = 'безнал'
+                    elif ' ип' in comment_lower or 'от ип' in comment_lower:
+                        pay_type = 'ип'
+                    elif 'ооо' in comment_lower:
+                        pay_type = 'ооо'
+                    if client and edit_date and (truck or obj or pay_type):
+                        ok, msg = _apply_return_update(client, edit_date, truck, obj, pay_type)
                         status = '✅' if ok else '⚠️'
                         send_msg(BLOK_GROUP_ID, f'{status} Sheets: {msg}')
                     else:
