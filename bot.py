@@ -3186,6 +3186,9 @@ def _confirm_accounting_events(events: list, sender_name: str):
                 if 'возврат' in comment_lower and ('поддон' in comment_lower or 'а/м' in comment_lower or 'объект' in comment_lower or 'наличк' in comment_lower or 'безнал' in comment_lower or 'нал' in comment_lower):
                     # Извлекаем авто и объект из комментария
                     import re as _re
+                    truck = ''
+                    obj = ''
+                    pay_type = ''
                     truck_m = _re.search(r'а/м\s+([а-яА-Яa-zA-Z0-9]+\s*\d+)', comment)
                     truck = truck_m.group(1).strip() if truck_m else ''
                     # Нормализуем номер машины
