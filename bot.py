@@ -2985,6 +2985,7 @@ def _confirm_accounting_events(events: list, sender_name: str):
                                     truck = valid
                                     break
                     obj_m = _re.search(r'[Оо]бъект\s+(.+?)(?:$|,|\.|\\n)', comment)
+                    obj = obj_m.group(1).strip() if obj_m else ''
                     if client and edit_date and (truck or obj):
                         ok, msg = _apply_return_update(client, edit_date, truck, obj)
                         status = '✅' if ok else '⚠️'
