@@ -2052,6 +2052,8 @@ def _dedup_check(event: dict) -> bool:
     for k in expired:
         del _dedup_cache[k]
     # Хеш по ключевым полям события
+    # ВАЖНО: from_location ИСКЛЮЧЁН из хеша — Claude может возвращать разные варианты
+    # ("Тихорецкая" vs "КРД" vs "закупка") для одного и того же рейса
     key_parts = [
         event.get('type') or '',
         event.get('date') or '',
@@ -2060,7 +2062,7 @@ def _dedup_check(event: dict) -> bool:
         str(event.get('price') or event.get('price_new') or ''),
         event.get('driver') or '',
         event.get('truck') or '',
-        event.get('from_location') or '',
+        # from_location — НЕ включаем (нестабильное поле)
         event.get('to_location') or '',
         event.get('price_contact') or '',
         event.get('price_date_from') or '',
@@ -3363,6 +3365,15 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     if not any(kw in text_lower for kw in keywords):
         return  # Не похоже на задание — просто логируем
 
+    # Дедупликация на уровне текста — если ТОЧНО тот же текст уже обработан, не парсим повторно
+    import hashlib as _hl
+    _text_hash = _hl.md5(text.strip().lower().encode()).hexdigest()
+    _text_dedup_key = f"txt_{_text_hash}"
+    if _text_dedup_key in _dedup_cache and (time.time() - _dedup_cache[_text_dedup_key]) < _DEDUP_TTL:
+        print(f"[DEDUP] Текст уже обработан (повтор): {text[:60]}", flush=True)
+        send_msg(BLOK_GROUP_ID, "ℹ️ Это сообщение уже было обработано ранее.")
+        return
+
     # Показываем индикатор "печатает..." пока бот обрабатывает
     send_action(BLOK_GROUP_ID, "typing_on")
     # Извлекаем дату из timestamp сообщения (МСК) — точнее чем текущее время
@@ -3392,6 +3403,10 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     trips = unique_trips
 
     print(f"[BLOK_GROUP] Распарсено {len(trips)} событий: {trips}", flush=True)
+
+    # Запоминаем хеш текста как обработанный
+    _dedup_cache[_text_dedup_key] = time.time()
+    _save_dedup_cache(_dedup_cache)
 
     # Рейсы/возвраты/цены → в Sheets
     sheet_events = [t for t in trips if t.get('type') in ('trip', 'return', 'price')]
