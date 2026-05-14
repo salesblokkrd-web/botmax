@@ -2141,6 +2141,7 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 - client: название клиента/организации
 - product: кодировка блока: "20(3-0)", "20(4-0)", "9(2-0)", "12(2-0)" или комбинация через "+"
 - pallets: количество поддонов (число)
+- qty_per_pallet: количество штук блока на поддоне (90, 72, 75, 120, 144, 150, 180 — если указано в сообщении)
 - pallet_type: "стандартный 1.0x1.2" или "узкий 0.8x1.2" или null
 - return_pallets: количество возвратных поддонов (для type=return)
 - price_product: название продукта (для type=price)
@@ -2476,9 +2477,14 @@ def _write_trips_to_sheets(trips: list):
                 trip_pallets = trip.get("pallets")
                 if trip_pallets:
                     try:
+                        # Если менеджер указал шт/подд — добавляем к product key для точного маппинга
+                        wh_product = product
+                        _qpp = trip.get("qty_per_pallet")
+                        if _qpp:
+                            wh_product = f"{product}/{_qpp}"
                         wh_ok, wh_msg = _apply_warehouse_shipment(
                             trip.get("from_location"),
-                            product,
+                            wh_product,
                             int(trip_pallets),
                             trip.get("date") or _today_msk()
                         )
