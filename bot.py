@@ -2153,7 +2153,8 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 Из текста извлеки ВСЕ ФАКТИЧЕСКИЕ события. Каждое событие — объект JSON:
 - type: "trip" (рейс/доставка), "return" (возврат поддонов), "price" (изменение цены),
         "client_add" (новый клиент), "client_edit" (изменение данных клиента),
-        "object_add" (добавить объект клиенту), "payment_info" (информация об оплате)
+        "object_add" (добавить объект клиенту), "payment_info" (информация об оплате),
+        "pallet_transfer" (перемещение поддонов между складами — НЕ блоков, а пустых поддонов)
 - date: дата ДД.ММ.ГГГГ (если не указана — сегодня {msg_date or _today_msk()})
 - driver: ФИО водителя (из списка выше, по фамилии)
 - truck: гос.номер машины (из списка выше)
@@ -2161,8 +2162,10 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 - to_location: куда ("КРД", "Карьер", название города/объекта)
 - client: название клиента/организации
 - product: кодировка блока: "20(3-0)", "20(4-0)", "9(2-0)", "12(2-0)" или комбинация через "+"
-- pallets: количество поддонов (число)
-- qty_per_pallet: количество штук блока на поддоне (90, 72, 75, 120, 144, 150, 180 — если указано в сообщении)
+- pallets: ОБЩЕЕ количество поддонов (число). Сумма всех типов блоков
+- qty_per_pallet: количество штук блока на поддоне (если указано и один тип блока)
+- products_detail: ОБЯЗАТЕЛЬНО если в сообщении указаны подд и/или шт/подд для каждого типа блока! Массив: [{{"code":"20(3-0)","pallets":10,"qty_per_pallet":72}},{{"code":"12(2-0)","pallets":10,"qty_per_pallet":120}}]. Каждый элемент: code (тип блока), pallets (кол-во поддонов этого типа), qty_per_pallet (штук на поддон, если указано)
+- source: "производство" или "закуп". Если откуда = "закупка"/"закуп"/"Белореченск" или подобное — ставь "закуп". Если КРД/Карьер/Тихорецкая — "производство"
 - pallet_type: "стандартный 1.0x1.2" или "узкий 0.8x1.2" или null
 - return_pallets: количество возвратных поддонов (для type=return)
 - price_product: название продукта (для type=price)
@@ -2315,25 +2318,24 @@ _WAREHOUSE_MAP_KARYER = {
     "20(3-0)керамзит": 77,  # 75 шт/подд
 }
 
-def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, trip_date: str = ""):
+def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, trip_date: str = "", products_detail: list = None):
     """Записывает кол-во отгруженных поддонов в КРД(склад) или Карьер(склад).
 
     Args:
         from_location: откуда отгрузка ("КРД", "Карьер")
         product: код продукции ("20(3-0)", "20(3-0)+9(2-0)", и т.д.)
-        pallets: кол-во поддонов
+        pallets: кол-во поддонов (общее, используется если нет products_detail)
         trip_date: дата рейса ДД.ММ.ГГГГ (если пусто — сегодня МСК)
+        products_detail: список [{"code":"20(3-0)","pallets":10,"qty_per_pallet":72}, ...]
 
     Returns:
         (ok: bool, message: str)
     """
     if not GOOGLE_SA_B64:
         return False, "Нет GOOGLE_SA_B64"
-    if not pallets or pallets <= 0:
-        return False, "Не указано кол-во поддонов"
 
     loc = (from_location or "").strip().upper()
-    if "КРД" in loc or "КРАСНОДАР" in loc:
+    if "КРД" in loc or "КРАСНОДАР" in loc or "ТИХОРЕЦК" in loc or "ТИХОРЕ" in loc:
         sheet_name = "КРД(склад)"
         wh_map = _WAREHOUSE_MAP_KRD
     elif "КАРЬЕР" in loc or "АРХИП" in loc:
@@ -2345,7 +2347,6 @@ def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, tr
     date_str = trip_date or _today_msk()
     try:
         day = int(date_str.split(".")[0])
-        # Строка 5 = 1-е число (1-indexed в gspread), day 1 → row 5
         gs_row = 4 + day
     except (ValueError, IndexError):
         return False, f"Не могу определить день из даты: {date_str}"
@@ -2353,20 +2354,25 @@ def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, tr
     if gs_row < 5 or gs_row > 35:
         return False, f"День {day} вне диапазона (1-31)"
 
-    products = [p.strip() for p in product.split("+") if p.strip()]
-    if not products:
-        return False, f"Пустой product: {product}"
-
-    prod_key = products[0]
-    start_col = wh_map.get(prod_key)
-    if start_col is None:
-        base_key = prod_key.split("/")[0]
-        start_col = wh_map.get(base_key)
-    if start_col is None:
-        return False, f"Продукт '{prod_key}' не найден в маппинге '{sheet_name}'"
-
-    # Колонка "Отгрузка (Подд, шт.)" = start_col + 4 (0-indexed), +1 для gspread
-    gs_col = start_col + 4 + 1
+    # Строим список продуктов с поддонами
+    items = []
+    if products_detail and isinstance(products_detail, list):
+        for pd in products_detail:
+            code = pd.get("code", "").strip()
+            pd_pallets = pd.get("pallets", 0)
+            qpp = pd.get("qty_per_pallet")
+            if code and pd_pallets and int(pd_pallets) > 0:
+                key = f"{code}/{qpp}" if qpp else code
+                items.append((key, int(pd_pallets)))
+    
+    if not items:
+        # Фоллбек: старая логика — один продукт, общее кол-во поддонов
+        if not pallets or pallets <= 0:
+            return False, "Не указано кол-во поддонов"
+        products_list = [p.strip() for p in product.split("+") if p.strip()]
+        if not products_list:
+            return False, f"Пустой product: {product}"
+        items = [(products_list[0], pallets)]
 
     try:
         import base64
@@ -2382,21 +2388,35 @@ def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, tr
         sh = gc.open_by_key(SHEETS_ID)
         ws = sh.worksheet(sheet_name)
 
-        current = ws.cell(gs_row, gs_col).value
-        current_val = 0
-        if current:
-            try:
-                current_val = int(str(current).strip())
-            except ValueError:
-                current_val = 0
+        messages = []
+        for prod_key, prod_pallets in items:
+            start_col = wh_map.get(prod_key)
+            if start_col is None:
+                base_key = prod_key.split("/")[0]
+                start_col = wh_map.get(base_key)
+            if start_col is None:
+                messages.append(f"⚠️ '{prod_key}' не найден в маппинге")
+                continue
 
-        new_val = current_val + pallets
-        ws.update_cell(gs_row, gs_col, new_val)
+            gs_col = start_col + 4 + 1
+            current = ws.cell(gs_row, gs_col).value
+            current_val = 0
+            if current:
+                try:
+                    current_val = int(str(current).replace("\xa0", "").replace(" ", "").strip())
+                except ValueError:
+                    current_val = 0
 
-        product_name = ws.cell(1, start_col + 1).value or prod_key
-        msg = f"{sheet_name}: {product_name[:40]} — {date_str}, отгрузка: {current_val}→{new_val} подд."
-        print(f"[WAREHOUSE] {msg}", flush=True)
-        return True, msg
+            new_val = current_val + prod_pallets
+            ws.update_cell(gs_row, gs_col, new_val)
+
+            product_name = ws.cell(1, start_col + 1).value or prod_key
+            msg = f"{product_name[:40]}: {current_val}→{new_val} подд."
+            messages.append(msg)
+            print(f"[WAREHOUSE] {sheet_name} {msg} ({date_str})", flush=True)
+
+        full_msg = f"{sheet_name} {date_str}: " + " | ".join(messages)
+        return True, full_msg
     except Exception as e:
         print(f"[WAREHOUSE] Ошибка записи в {sheet_name}: {e}", flush=True)
         return False, f"Ошибка записи в {sheet_name}: {e}"
@@ -2436,6 +2456,26 @@ def _write_trips_to_sheets(trips: list):
                 # Цены НЕ пишем в лист Рейсы — они идут в секцию «Контактное лицо» через _apply_price_change
                 last_num -= 1  # откатываем счётчик
                 continue
+            elif evt_type == "pallet_transfer":
+                # Перемещение поддонов между складами → пишем в Рейсы, НЕ трогаем склад
+                product_desc = f"Поддоны {trip.get('pallets', '')} шт"
+                row = [
+                    str(last_num),
+                    trip.get("date") or _today_msk(),
+                    trip.get("truck") or "",
+                    trip.get("driver") or "",
+                    trip.get("from_location") or "",
+                    trip.get("to_location") or "",
+                    trip.get("client") or trip.get("to_location") or "",
+                    product_desc,
+                ]
+                ws.append_row(row, value_input_option="USER_ENTERED")
+                confirm = f"✅ Перемещение #{last_num}: {trip.get('driver','')} ({trip.get('truck','')})"
+                confirm += f"\n{trip.get('from_location','')} → {trip.get('to_location','')}"
+                confirm += f"\nПоддоны: {trip.get('pallets', '?')} шт"
+                send_msg(BLOK_GROUP_ID, confirm)
+                print(f"[BLOK_SHEETS] Перемещение поддонов: {row}", flush=True)
+                continue  # НЕ списываем со склада
             elif evt_type == "return":
                 # Возврат поддонов → пишем в секцию ВОЗВРАТ на листе клиента, НЕ в Рейсы
                 last_num -= 1  # откатываем счётчик — возврат не считается рейсом
@@ -2493,25 +2533,20 @@ def _write_trips_to_sheets(trips: list):
             # ─── Складской учёт: списание со склада ───
             # Записываем в КРД(склад) или Карьер(склад) кол-во отгруженных поддонов
             # НЕ списываем если это закупной рейс (Источник = Закуп)
-            trip_source = trip.get("source") or ""
-            if product and trip.get("from_location") and trip_source.lower() != "закуп":
+            trip_source = (trip.get("source") or "").lower()
+            from_loc = (trip.get("from_location") or "").lower()
+            is_purchase = trip_source == "закуп" or "закуп" in from_loc
+            if product and trip.get("from_location") and not is_purchase:
                 trip_pallets = trip.get("pallets")
-                if trip_pallets:
+                p_detail = trip.get("products_detail")
+                if trip_pallets or p_detail:
                     try:
-                        # Если менеджер указал шт/подд — добавляем к ПЕРВОМУ продукту для точного маппинга
-                        _qpp = trip.get("qty_per_pallet")
-                        if _qpp and "+" in product:
-                            parts = product.split("+", 1)
-                            wh_product = f"{parts[0].strip()}/{_qpp}+{parts[1]}"
-                        elif _qpp:
-                            wh_product = f"{product}/{_qpp}"
-                        else:
-                            wh_product = product
                         wh_ok, wh_msg = _apply_warehouse_shipment(
                             trip.get("from_location"),
-                            wh_product,
-                            int(trip_pallets),
-                            trip.get("date") or _today_msk()
+                            product,
+                            int(trip_pallets) if trip_pallets else 0,
+                            trip.get("date") or _today_msk(),
+                            products_detail=p_detail,
                         )
                         if wh_ok:
                             send_msg(BLOK_GROUP_ID, f"📦 Склад: {wh_msg}")
