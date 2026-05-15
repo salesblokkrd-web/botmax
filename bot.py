@@ -58,6 +58,16 @@ def _today_msk() -> str:
     now_msk = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
     return now_msk.strftime("%d.%m.%Y")
 
+def _alert_admin(error_context: str, error: Exception):
+    """Отправляет алерт администратору при критических ошибках Sheets."""
+    if OWNER_CHAT_ID:
+        try:
+            msg = f"⚠️ Ошибка учётчика\n{error_context}\n{type(error).__name__}: {str(error)[:200]}"
+            send_msg(OWNER_CHAT_ID, msg)
+        except Exception:
+            pass
+    print(f"[ALERT] {error_context}: {error}", flush=True)
+
 # ─── Группа производства "Архиповский блок" ───────────────────────────────
 BLOK_GROUP_ID = int(os.environ.get("BLOK_GROUP_ID", "-68840834804304"))  # Производство Тихорецкая
 GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")  # base64(service_account.json)
@@ -93,8 +103,10 @@ def _save_dedup_cache(cache: dict):
         print(f"[DEDUP] Ошибка сохранения кеша: {e}", flush=True)
 
 _dedup_cache = _load_dedup_cache()
+_dedup_lock = threading.Lock()
 
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
+_PALLET_PRICE = int(os.environ.get("PALLET_PRICE", "550"))
 
 PRODUCTS = {
     "Отсев 0-5":             614,
@@ -414,6 +426,16 @@ def load_state():
     except Exception as e:
         print(f"[STATE] Ошибка загрузки: {e}", flush=True)
 
+# ─── Проверка критических env vars ─────────────────────────────────────────
+_REQUIRED_VARS = {"MAX_BOT_TOKEN": TOKEN, "GOOGLE_SA_B64": GOOGLE_SA_B64}
+_OPTIONAL_VARS = {"CLAUDE_API_KEY": CLAUDE_API_KEY, "GROQ_API_KEY": GROQ_API_KEY}
+for _vn, _vv in _REQUIRED_VARS.items():
+    if not _vv:
+        print(f"[INIT] КРИТИЧНО: {_vn} не задан! Бот не сможет работать.", flush=True)
+for _vn, _vv in _OPTIONAL_VARS.items():
+    if not _vv:
+        print(f"[INIT] ПРЕДУПРЕЖДЕНИЕ: {_vn} не задан — часть функций отключена.", flush=True)
+
 # ─── Max Bot API ───────────────────────────────────────────────────────────
 
 BASE_URL = "https://botapi.max.ru"
@@ -422,21 +444,35 @@ def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> 
     p["access_token"] = TOKEN  # MAX API требует токен в query string
     url = f"{BASE_URL}/{endpoint}?{urllib.parse.urlencode(p)}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    if data:
-        req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "quarry-max-bot/1.0")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        print(f"[API] {method} /{endpoint} HTTP {e.code}: {e.read()[:300]}", flush=True)
-        return {}
-    except Exception as e:
-        print(f"[API] {method} /{endpoint} error: {e}", flush=True)
-        return {}
+    for _retry in range(2):
+        req = urllib.request.Request(url, data=data, method=method)
+        if data:
+            req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", "quarry-max-bot/1.0")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            code_val = e.code
+            if code_val in (429, 500, 502, 503) and _retry == 0:
+                print(f"[API] {method} /{endpoint} HTTP {code_val}, retry in 2s...", flush=True)
+                time.sleep(2)
+                continue
+            print(f"[API] {method} /{endpoint} HTTP {code_val}: {e.read()[:300]}", flush=True)
+            return {}
+        except Exception as e:
+            if _retry == 0:
+                print(f"[API] {method} /{endpoint} error: {e}, retry...", flush=True)
+                time.sleep(1)
+                continue
+            print(f"[API] {method} /{endpoint} error: {e}", flush=True)
+            return {}
+    return {}
 def send_msg(chat_id: int, text: str, buttons=None) -> dict:
     """Отправить сообщение. buttons = [[{text, payload}, ...], ...] или None."""
+    # MAX API limit ~4000 chars
+    if len(text) > 3900:
+        text = text[:3900] + "\n... (обрезано)"
     body = {"text": text}
     if buttons:
         body["attachments"] = [{
@@ -2047,39 +2083,40 @@ def _dedup_check(event: dict) -> bool:
     Возвращает True если ДУБЛИКАТ (уже было), False если новое."""
     import hashlib
     now = time.time()
-    # Чистим устаревшие записи
-    expired = [k for k, v in _dedup_cache.items() if now - v > _DEDUP_TTL]
-    for k in expired:
-        del _dedup_cache[k]
-    # Хеш по ключевым полям события
-    # ВАЖНО: from_location ИСКЛЮЧЁН из хеша — Claude может возвращать разные варианты
+    with _dedup_lock:
+        # Чистим устаревшие записи
+        expired = [k for k, v in _dedup_cache.items() if now - v > _DEDUP_TTL]
+        for k in expired:
+            del _dedup_cache[k]
+        # Хеш по ключевым полям события
+        # ВАЖНО: from_location ИСКЛЮЧЁН из хеша — Claude может возвращать разные варианты
     # ("Тихорецкая" vs "КРД" vs "закупка") для одного и того же рейса
-    key_parts = [
-        event.get('type') or '',
-        event.get('date') or '',
-        event.get('client') or '',
-        event.get('product') or event.get('price_product') or '',
-        str(event.get('price') or event.get('price_new') or ''),
-        event.get('driver') or '',
-        event.get('truck') or '',
-        # from_location — НЕ включаем (нестабильное поле)
-        event.get('to_location') or '',
-        event.get('price_contact') or '',
-        event.get('price_date_from') or '',
-        event.get('object_name') or '',
-        str(event.get('payment_amount') or ''),
-        event.get('payment_type') or '',
-        event.get('payment_method') or '',
-        str(event.get('pallets') or ''),
-        str(event.get('return_pallets') or ''),
-    ]
-    h = hashlib.md5('|'.join(key_parts).lower().encode()).hexdigest()
-    if h in _dedup_cache:
-        print(f"[DEDUP] Дубликат отклонён: {key_parts}", flush=True)
-        return True
-    _dedup_cache[h] = now
-    _save_dedup_cache(_dedup_cache)
-    return False
+        key_parts = [
+            event.get('type') or '',
+            event.get('date') or '',
+            event.get('client') or '',
+            event.get('product') or event.get('price_product') or '',
+            str(event.get('price') or event.get('price_new') or ''),
+            event.get('driver') or '',
+            event.get('truck') or '',
+            # from_location — НЕ включаем (нестабильное поле)
+            event.get('to_location') or '',
+            event.get('price_contact') or '',
+            event.get('price_date_from') or '',
+            event.get('object_name') or '',
+            str(event.get('payment_amount') or ''),
+            event.get('payment_type') or '',
+            event.get('payment_method') or '',
+            str(event.get('pallets') or ''),
+            str(event.get('return_pallets') or ''),
+        ]
+        h = hashlib.md5('|'.join(key_parts).lower().encode()).hexdigest()
+        if h in _dedup_cache:
+            print(f"[DEDUP] Дубликат отклонён: {key_parts}", flush=True)
+            return True
+        _dedup_cache[h] = now
+        _save_dedup_cache(_dedup_cache)
+        return False
 def _normalize_truck(truck: str) -> str:
     """Раскрывает сокращения номеров машин: 135 → у135рх 193"""
     if not truck:
@@ -2223,14 +2260,23 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
             "content-type": "application/json",
         }
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+    for _attempt in range(2):
+      try:
+        with urllib.request.urlopen(req, timeout=30) as r:
             resp = json.loads(r.read())
         raw_text = resp["content"][0]["text"].strip()
         # Убираем markdown-блок если есть
         raw_text = re.sub(r'^```[a-z]*\n?', '', raw_text)
         raw_text = re.sub(r'\n?```$', '', raw_text)
-        events = json.loads(raw_text)
+        try:
+            events = json.loads(raw_text)
+        except json.JSONDecodeError:
+            if _attempt == 0:
+                print(f"[BLOK_PARSE] Невалидный JSON от Claude (попытка 1), повтор...", flush=True)
+                continue
+            else:
+                print(f"[BLOK_PARSE] Невалидный JSON от Claude (попытка 2): {raw_text[:200]}", flush=True)
+                return []
         # Нормализация полей (Claude иногда возвращает альтернативные имена)
         for evt in events:
             if 'new_price' in evt and 'price_new' not in evt:
@@ -2262,10 +2308,24 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
             # payment_date → date (нормализация для payment_info)
             if 'payment_date' in evt and 'date' not in evt:
                 evt['date'] = evt.pop('payment_date')
+        # Нормализация дат: Claude может вернуть "2026-05-15" вместо "15.05.2026"
+        import re as _re_date
+        for evt in events:
+            for dk in ('date', 'price_date_from'):
+                dv = evt.get(dk)
+                if dv and isinstance(dv, str):
+                    m = _re_date.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', dv)
+                    if m:
+                        evt[dk] = f"{int(m.group(3)):02d}.{int(m.group(2)):02d}.{m.group(1)}"
         return events
-    except Exception as e:
-        print(f"[BLOK_PARSE] Ошибка: {e}", flush=True)
+      except Exception as e:
+        if _attempt == 0:
+            print(f"[BLOK_PARSE] Ошибка (попытка 1): {e}, повтор...", flush=True)
+            time.sleep(1)
+            continue
+        print(f"[BLOK_PARSE] Ошибка (попытка 2): {e}", flush=True)
         return []
+    return []  # fallback
 
 # ─── Складской учёт: маппинг продукции → мини-таблицы на КРД(склад) / Карьер(склад) ───
 
@@ -2372,7 +2432,14 @@ def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, tr
         products_list = [p.strip() for p in product.split("+") if p.strip()]
         if not products_list:
             return False, f"Пустой product: {product}"
-        items = [(products_list[0], pallets)]
+        if len(products_list) == 1:
+            items = [(products_list[0], pallets)]
+        else:
+            # Несколько продуктов через "+" — делим поддоны поровну
+            per_product = max(1, pallets // len(products_list))
+            remainder = pallets - per_product * len(products_list)
+            items = [(p, per_product + (1 if i == 0 and remainder > 0 else 0)) for i, p in enumerate(products_list)]
+            print(f"[WAREHOUSE] split {pallets} pallets across {products_list}: {items}", flush=True)
 
     try:
         import base64
@@ -2556,6 +2623,25 @@ def _write_trips_to_sheets(trips: list):
                         print(f"[WAREHOUSE] Ошибка: {e}", flush=True)
     except Exception as e:
         print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
+        _alert_admin("Ошибка записи рейсов в Sheets", e)
+def _find_client_worksheet(sh, client_name: str):
+    """Ищет лист клиента: сначала точное совпадение, потом по началу имени.
+    Возвращает worksheet или None."""
+    client_upper = client_name.upper().strip()
+    # 1. Точное совпадение
+    for sheet in sh.worksheets():
+        if sheet.title.upper().strip() == client_upper:
+            return sheet
+    # 2. Совпадение по началу (лист "МЕЛИК" для запроса "МЕЛИК" или "МЕЛИКСЕТЯНТ")
+    for sheet in sh.worksheets():
+        title_up = sheet.title.upper().strip()
+        if title_up.startswith(client_upper) or client_upper.startswith(title_up):
+            # Защита от ложных совпадений: минимум 3 общих символа
+            common_len = min(len(title_up), len(client_upper))
+            if common_len >= 3:
+                return sheet
+    return None
+
 def _apply_return_update(client_name: str, return_date: str, truck: str = "", obj: str = "", payment_type: str = ""):
     """Дописывает авто и объект в существующую запись возврата поддонов."""
     if not GOOGLE_SA_B64:
@@ -2571,17 +2657,7 @@ def _apply_return_update(client_name: str, return_date: str, truck: str = "", ob
         )
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(SHEETS_ID)
-        ws = None
-        client_upper = client_name.upper().strip()
-        for sheet in sh.worksheets():
-            if sheet.title.upper().strip() == client_upper:
-                ws = sheet
-                break
-        if not ws:
-            for sheet in sh.worksheets():
-                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
-                    ws = sheet
-                    break
+        ws = _find_client_worksheet(sh, client_name)
         if not ws:
             return False, f"Лист '{client_name}' не найден"
 
@@ -2589,7 +2665,7 @@ def _apply_return_update(client_name: str, return_date: str, truck: str = "", ob
         ret_data = ws.get("X8:Z100")
         target_row = None
         for i, row in enumerate(ret_data, 8):
-            if row and str(row[0]).strip() == return_date:
+            if row and str(row[0]).strip() and _dates_match(str(row[0]).strip(), return_date):
                 # Нашли строку с этой датой — проверяем пустые авто/объект
                 cur_truck = row[1].strip() if len(row) > 1 and row[1] else ""
                 cur_obj = row[2].strip() if len(row) > 2 and row[2] else ""
@@ -2807,17 +2883,7 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
         sh = gc.open_by_key(SHEETS_ID)
 
         # Ищем лист клиента
-        ws = None
-        client_upper = client_name.upper().strip()
-        for sheet in sh.worksheets():
-            if sheet.title.upper().strip() == client_upper:
-                ws = sheet
-                break
-        if not ws:
-            for sheet in sh.worksheets():
-                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
-                    ws = sheet
-                    break
+        ws = _find_client_worksheet(sh, client_name)
         if not ws:
             return False, f"Лист \'{client_name}\' не найден"
 
@@ -2850,16 +2916,19 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
 
         # Определяем куда ставить галочку
         # pay_type: "нал"/"безнал", pay_method: "ИП"/"ООО"
-        is_nal = "нал" in pay_type.lower() and "безнал" not in pay_type.lower()
-        is_ip = pay_method.upper() == "ИП" or ("ип" in pay_type.lower() and not is_nal)
-        is_ooo = pay_method.upper() == "ООО" or ("ооо" in pay_type.lower())
-        
-        # Если безнал без уточнения ИП/ООО — ставим ООО по умолчанию
-        if "безнал" in pay_type.lower() and not is_ip and not is_ooo:
-            is_ooo = True
-        # Если ничего не определено — ставим Нал (частник, наличные)
-        if not is_nal and not is_ip and not is_ooo:
-            is_nal = True
+        # Mutual exclusion: только ОДНА галочка
+        pt = pay_type.lower()
+        pm = pay_method.upper()
+        if pm == "ООО" or "ооо" in pt:
+            is_ooo, is_ip, is_nal = True, False, False
+        elif pm == "ИП" or ("безнал" in pt and "ооо" not in pt) or "ип" in pt:
+            is_ooo, is_ip, is_nal = False, True, False
+        elif "нал" in pt and "безнал" not in pt:
+            is_ooo, is_ip, is_nal = False, False, True
+        elif "безнал" in pt:
+            is_ooo, is_ip, is_nal = True, False, False  # безнал без уточнения → ООО
+        else:
+            is_ooo, is_ip, is_nal = False, False, True  # по умолчанию нал
 
         ws.update_cell(empty_row, COL_DATE, today)
         ws.update_cell(empty_row, COL_OOO, True if is_ooo else False)
@@ -2902,17 +2971,7 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
         sh = gc.open_by_key(SHEETS_ID)
 
         # Ищем лист клиента
-        ws = None
-        client_upper = client_name.upper().strip()
-        for sheet in sh.worksheets():
-            if sheet.title.upper().strip() == client_upper:
-                ws = sheet
-                break
-        if not ws:
-            for sheet in sh.worksheets():
-                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
-                    ws = sheet
-                    break
+        ws = _find_client_worksheet(sh, client_name)
         if not ws:
             return False, f"Лист '{client_name}' не найден"
 
@@ -2954,11 +3013,11 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
             ws.update_cell(empty_row, COL_OBJ, obj)
         ws.update_cell(empty_row, COL_PTYPE, p_type)
         ws.update_cell(empty_row, COL_QTY, return_pallets)
-        ws.update_cell(empty_row, COL_PRICE, 550)
+        ws.update_cell(empty_row, COL_PRICE, _PALLET_PRICE)
         # Сумма — формула
         ws.update_acell(f"AD{empty_row}", f"=AB{empty_row}*AC{empty_row}")
 
-        barter_sum = return_pallets * 550
+        barter_sum = return_pallets * _PALLET_PRICE
         msg = f"Возврат поддонов записан в '{ws.title}' строка {empty_row}: {p_type} {return_pallets} шт от {ret_date}"
         print(f"[RETURN] {msg}", flush=True)
 
@@ -3039,17 +3098,7 @@ def _apply_object_add(client_name: str, object_name: str):
         sh = gc.open_by_key(SHEETS_ID)
 
         # Ищем лист клиента
-        ws = None
-        client_upper = client_name.upper().strip()
-        for sheet in sh.worksheets():
-            if sheet.title.upper().strip() == client_upper:
-                ws = sheet
-                break
-        if not ws:
-            for sheet in sh.worksheets():
-                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
-                    ws = sheet
-                    break
+        ws = _find_client_worksheet(sh, client_name)
         if not ws:
             return False, f"Лист '{client_name}' не найден"
 
@@ -3085,6 +3134,25 @@ def _apply_object_add(client_name: str, object_name: str):
         msg = f"Ошибка: {e}"
         print(f"[OBJ_ADD] {msg}", flush=True)
         return False, msg
+def _dates_match(d1: str, d2: str) -> bool:
+    """Сравнивает две даты в произвольном формате (ДД.ММ.ГГГГ, ДД.ММ.ГГ, ГГГГ-ММ-ДД)."""
+    import re as _re
+    def _norm(d):
+        d = d.strip().rstrip('г.').rstrip('г').strip()
+        # ДД.ММ.ГГГГ or ДД.ММ.ГГ
+        m = _re.match(r'(\d{1,2})[./](\d{1,2})[./](\d{2,4})', d)
+        if m:
+            dd, mm, yy = m.group(1), m.group(2), m.group(3)
+            if len(yy) == 2:
+                yy = '20' + yy
+            return f"{int(dd):02d}.{int(mm):02d}.{yy}"
+        # ГГГГ-ММ-ДД
+        m = _re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})', d)
+        if m:
+            return f"{int(m.group(3)):02d}.{int(m.group(2)):02d}.{m.group(1)}"
+        return d
+    return _norm(d1) == _norm(d2)
+
 def _apply_payment_edit(client_name: str, contact_name: str, edit_date: str = ""):
     """Находит оплату по дате на листе клиента и вписывает клиента/контакт в колонку S.
     
@@ -3105,17 +3173,7 @@ def _apply_payment_edit(client_name: str, contact_name: str, edit_date: str = ""
         sh = gc.open_by_key(SHEETS_ID)
 
         # Ищем лист клиента
-        ws = None
-        client_upper = client_name.upper().strip()
-        for sheet in sh.worksheets():
-            if sheet.title.upper().strip() == client_upper:
-                ws = sheet
-                break
-        if not ws:
-            for sheet in sh.worksheets():
-                if client_upper in sheet.title.upper() or sheet.title.upper() in client_upper:
-                    ws = sheet
-                    break
+        ws = _find_client_worksheet(sh, client_name)
         if not ws:
             return False, f"Лист '{client_name}' не найден"
 
@@ -3132,8 +3190,8 @@ def _apply_payment_edit(client_name: str, contact_name: str, edit_date: str = ""
             if row and str(row[0]).strip():
                 row_date = str(row[0]).strip()
                 row_client = str(row[4]).strip() if len(row) > 4 else ""
-                # Сравниваем даты (формат может быть разный)
-                if edit_date and edit_date in row_date:
+                # Сравниваем даты — нормализуем для точного сравнения
+                if edit_date and _dates_match(edit_date, row_date):
                     found_rows.append((i, row_date, row_client))
 
         if not found_rows:
@@ -3404,7 +3462,9 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     import hashlib as _hl
     _text_hash = _hl.md5(text.strip().lower().encode()).hexdigest()
     _text_dedup_key = f"txt_{_text_hash}"
-    if _text_dedup_key in _dedup_cache and (time.time() - _dedup_cache[_text_dedup_key]) < _DEDUP_TTL:
+    with _dedup_lock:
+        _text_is_dup = _text_dedup_key in _dedup_cache and (time.time() - _dedup_cache[_text_dedup_key]) < _DEDUP_TTL
+    if _text_is_dup:
         print(f"[DEDUP] Текст уже обработан (повтор): {text[:60]}", flush=True)
         send_msg(BLOK_GROUP_ID, "ℹ️ Это сообщение уже было обработано ранее.")
         return
@@ -3440,8 +3500,9 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     print(f"[BLOK_GROUP] Распарсено {len(trips)} событий: {trips}", flush=True)
 
     # Запоминаем хеш текста как обработанный
-    _dedup_cache[_text_dedup_key] = time.time()
-    _save_dedup_cache(_dedup_cache)
+    with _dedup_lock:
+        _dedup_cache[_text_dedup_key] = time.time()
+        _save_dedup_cache(_dedup_cache)
 
     # Рейсы/возвраты/цены → в Sheets
     sheet_events = [t for t in trips if t.get('type') in ('trip', 'return', 'price')]

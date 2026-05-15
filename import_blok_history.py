@@ -86,8 +86,12 @@ def load_checkpoint() -> int:
 
 def save_checkpoint(last_ts_ms: int):
     dt = datetime.datetime.fromtimestamp(last_ts_ms / 1000).strftime("%Y-%m-%d %H:%M")
-    with open(CHECKPOINT_FILE, "w") as f:
+    tmp_file = CHECKPOINT_FILE + ".tmp"
+    with open(tmp_file, "w") as f:
         json.dump({"last_ts_ms": last_ts_ms, "last_dt": dt, "group_id": GROUP_ID}, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_file, CHECKPOINT_FILE)
     log(f"[Чекпоинт] Сохранён: {dt}")
 
 
@@ -107,6 +111,7 @@ def max_get(path: str, params: dict = None) -> dict:
 def get_new_messages(from_ts_ms: int) -> list:
     """Читает все сообщения из группы начиная с from_ts_ms."""
     messages = []
+    seen_ids = set()
     cursor = from_ts_ms + 1  # +1 чтобы не читать последнее уже обработанное
 
     while True:
@@ -125,13 +130,28 @@ def get_new_messages(from_ts_ms: int) -> list:
             log(f"  MAX API вернул пустой список (cursor={cursor}). resp keys: {list(resp.keys())}")
             break
 
-        messages.extend(batch)
-        log(f"  Получено {len(batch)} сообщений (всего {len(messages)})")
+        # Дедупликация по message_id
+        new_batch = []
+        for m in batch:
+            mid = m.get("message_id") or m.get("mid")
+            if mid and mid in seen_ids:
+                continue
+            if mid:
+                seen_ids.add(mid)
+            new_batch.append(m)
+
+        messages.extend(new_batch)
+        log(f"  Получено {len(new_batch)} новых из {len(batch)} (всего {len(messages)})")
 
         if len(batch) < 100:
             break  # Конец страниц
 
-        cursor = batch[-1].get("timestamp", 0) + 1
+        # Используем timestamp последнего сообщения, но проверяем прогресс
+        new_cursor = batch[-1].get("timestamp", 0) + 1
+        if new_cursor <= cursor:
+            log(f"  Cursor не продвинулся ({cursor} → {new_cursor}), выходим")
+            break
+        cursor = new_cursor
         time.sleep(0.3)
 
     return messages
@@ -271,8 +291,16 @@ def update_stock(trips: list, gc):
             if not wh:
                 log(f"  [СКЛАД] Склад не указан: {trip.get('block_type')} {trip.get('pallets')}пд — пропуск")
             continue
+        try:
+            pallets_int = int(pallets)
+        except (ValueError, TypeError):
+            log(f"  [СКЛАД] Невалидное кол-во поддонов: {pallets} для {bt} — пропуск")
+            continue
+        if pallets_int <= 0:
+            log(f"  [СКЛАД] Поддоны <= 0: {pallets_int} для {bt} — пропуск")
+            continue
         key = (wh.upper(), bt)
-        totals[key] = totals.get(key, 0) + int(pallets)
+        totals[key] = totals.get(key, 0) + pallets_int
 
     for (wh, block_type), total_pallets in totals.items():
         sheet_name = "КРД(склад)" if wh == "КРД" else "Карьер(склад)"
@@ -349,10 +377,17 @@ def _row_matches_block(row: list, block_type: str) -> bool:
     filler = bt_norm["filler"]
     voids = bt_norm["voids"]
 
-    # Проверяем размер (с учётом "12" vs "120" vs "9" vs "90")
-    size_map = {"20": ["20", "двадцатк"], "12": ["12", "120", "двенашк"], "9": ["9", "90", "девятк", "полублок"]}
-    size_aliases = size_map.get(size, [size])
-    if not any(a in row_text for a in size_aliases):
+    # Проверяем размер — используем word boundary чтобы "9" не совпало с "190"
+    import re as _re
+    size_patterns = {
+        "20": r'(?:^|\W)20(?:\W|$)|двадцатк',
+        "12": r'(?:^|\W)(?:12|120)(?:\W|$)|двенашк',
+        "9":  r'(?:^|\W)(?:9|90)(?:\W|$)|девятк|полублок',
+    }
+    pattern = size_patterns.get(size)
+    if pattern and not _re.search(pattern, row_text):
+        return False
+    elif not pattern and size not in row_text:
         return False
 
     # Проверяем наполнитель если есть
@@ -479,11 +514,16 @@ def main():
     diag(f"=== Итого рейсов: {len(all_trips)} ===")
 
     if not all_trips:
-        last_ts = max(m.get("timestamp", 0) for m in messages)
-        if not DRY_RUN:
-            save_checkpoint(last_ts)
-        diag("Рейсов для записи нет.")
-        send_diag("⚠️ Рейсов не найдено (сообщения есть, планов нет)")
+        if not plan_msgs:
+            # Нет планов вообще — безопасно двигать чекпоинт
+            last_ts = max(m.get("timestamp", 0) for m in messages)
+            if not DRY_RUN:
+                save_checkpoint(last_ts)
+            diag("Сообщения есть, но планов нет — чекпоинт продвинут.")
+        else:
+            # Планы были, но Claude ничего не распарсил — НЕ двигаем чекпоинт
+            diag(f"⚠️ Claude не распарсил {len(plan_msgs)} планов — чекпоинт НЕ продвинут!")
+        send_diag("⚠️ Рейсов не найдено")
         return
 
     # 5. Записываем в Sheets
