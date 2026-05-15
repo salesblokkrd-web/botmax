@@ -25,7 +25,7 @@ DRY_RUN = "--dry-run" in sys.argv
 TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 # Telegram для уведомлений хозяину о том что разнесено
 TG_TOKEN = os.environ.get("SECRETARY_BOT_TOKEN", "")
-OWNER_TG_ID = int(os.environ.get("SECRETARY_ADMIN_ID", "215294536"))
+OWNER_TG_ID = int(os.environ.get("SECRETARY_ADMIN_ID", "0"))
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 GOOGLE_SA_B64 = os.environ.get("GOOGLE_SA_B64", "")
 SHEETS_ID = "1FwpvHhDHiNuFOdXlTcrVuTWKUqh2NmWVn810ylM0MkQ"
@@ -105,7 +105,12 @@ def max_get(path: str, params: dict = None) -> dict:
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Bearer {TOKEN}")
     with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
-        return json.loads(r.read())
+        data = json.loads(r.read())
+    # MAX API возвращает 200 OK даже при логических ошибках, ошибка в теле.
+    # Без этой проверки messages=[] выглядит как "сообщений нет" — данные молча теряются.
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(f"MAX API error: {data.get('error')} (code={data.get('code')}, msg={data.get('message')})")
+    return data
 
 
 def get_new_messages(from_ts_ms: int) -> list:
@@ -527,14 +532,26 @@ def main():
         return
 
     # 5. Записываем в Sheets
+    # ВАЖНО: checkpoint сохраняем ДО записи — иначе при сбое write_trips/update_stock
+    # на следующем запуске рейсы запишутся повторно (дубли в Рейсах и в остатках).
+    # Если запись упадёт — данные нужно восстанавливать вручную из лога ниже.
     if not DRY_RUN:
-        gc = get_gspread()
-        log("--- Запись рейсов в 'Рейсы' ---")
-        write_trips(all_trips, gc)
-        log("--- Обновление остатков ---")
-        update_stock(all_trips, gc)
         last_ts = max(m.get("timestamp", 0) for m in messages)
         save_checkpoint(last_ts)
+        try:
+            gc = get_gspread()
+            log("--- Запись рейсов в 'Рейсы' ---")
+            write_trips(all_trips, gc)
+            log("--- Обновление остатков ---")
+            update_stock(all_trips, gc)
+        except Exception as e:
+            # Critical: checkpoint уже продвинут, но запись упала. Логируем всё для восстановления.
+            log(f"[КРИТ] Запись в Sheets упала после продвижения чекпоинта: {e}")
+            log(f"[RECOVERY] Несохранённые рейсы для ручного восстановления:")
+            for t in all_trips:
+                log(f"[RECOVERY]   {json.dumps(t, ensure_ascii=False)}")
+            send_diag(f"❌ Sheets упал — {len(all_trips)} рейсов нужно вбить вручную (см. лог)")
+            raise
     else:
         log("[dry-run] Рейсы НЕ записаны в Sheets")
 

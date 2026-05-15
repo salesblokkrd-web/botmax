@@ -429,9 +429,12 @@ def load_state():
 # ─── Проверка критических env vars ─────────────────────────────────────────
 _REQUIRED_VARS = {"MAX_BOT_TOKEN": TOKEN, "GOOGLE_SA_B64": GOOGLE_SA_B64}
 _OPTIONAL_VARS = {"CLAUDE_API_KEY": CLAUDE_API_KEY, "GROQ_API_KEY": GROQ_API_KEY}
-for _vn, _vv in _REQUIRED_VARS.items():
-    if not _vv:
+_missing_required = [vn for vn, vv in _REQUIRED_VARS.items() if not vv]
+if _missing_required:
+    for _vn in _missing_required:
         print(f"[INIT] КРИТИЧНО: {_vn} не задан! Бот не сможет работать.", flush=True)
+    print(f"[INIT] Завершаю работу — задайте {', '.join(_missing_required)} в окружении.", flush=True)
+    sys.exit(1)
 for _vn, _vv in _OPTIONAL_VARS.items():
     if not _vv:
         print(f"[INIT] ПРЕДУПРЕЖДЕНИЕ: {_vn} не задан — часть функций отключена.", flush=True)
@@ -1833,13 +1836,14 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
 def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str, **kwargs):
     global processed_callbacks
     # Игнорируем повторные нажатия одной и той же кнопки
-    if callback_id in processed_callbacks:
-        answer_cb(callback_id)
-        print(f"[CB] Дубль проигнорирован: {callback_id[:20]}", flush=True)
-        return
-    processed_callbacks.add(callback_id)
-    if len(processed_callbacks) > 2000:
-        processed_callbacks.clear()  # reset: set has no order, can't keep "recent"
+    with _dedup_lock:
+        if callback_id in processed_callbacks:
+            answer_cb(callback_id)
+            print(f"[CB] Дубль проигнорирован: {callback_id[:20]}", flush=True)
+            return
+        processed_callbacks.add(callback_id)
+        if len(processed_callbacks) > 2000:
+            processed_callbacks.clear()  # reset: set has no order, can't keep "recent"
 
     if payload == "voice_ok":
         print(f"[VOICE_CB] voice_ok: user_id={user_id}, chat_id={chat_id}, pending_keys={list(pending_voice.keys())}", flush=True)
@@ -2486,6 +2490,7 @@ def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, tr
         return True, full_msg
     except Exception as e:
         print(f"[WAREHOUSE] Ошибка записи в {sheet_name}: {e}", flush=True)
+        _alert_admin(f"Склад: ошибка записи в {sheet_name}", e)
         return False, f"Ошибка записи в {sheet_name}: {e}"
 
 def _write_trips_to_sheets(trips: list):
@@ -2729,6 +2734,7 @@ def _apply_return_update(client_name: str, return_date: str, truck: str = "", ob
         return True, msg
     except Exception as e:
         print(f"[RETURN_UPD] Ошибка: {e}", flush=True)
+        _alert_admin("Обновление возврата: ошибка Sheets", e)
         return False, str(e)
 
 def _apply_price_change(client_name: str, product: str, new_price: float, date_from: str = "", contact_name: str = "", qty_per_pallet: str = ""):
@@ -2859,6 +2865,7 @@ def _apply_price_change(client_name: str, product: str, new_price: float, date_f
     except Exception as e:
         msg = f"Ошибка: {e}"
         print(f"[PRICE] {msg}", flush=True)
+        _alert_admin(f"Цена для '{client_name}' / '{product}': ошибка Sheets", e)
         return False, msg
 
 def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_method: str = "", payment_date: str = "", contact_name: str = ""):
@@ -2948,9 +2955,10 @@ def _apply_payment(client_name: str, amount: float, pay_type: str = "", pay_meth
     except Exception as e:
         msg = f"Ошибка: {e}"
         print(f"[PAYMENT] {msg}", flush=True)
+        _alert_admin(f"Оплата для '{client_name}' ({amount} руб.): ошибка Sheets", e)
         return False, msg
 
-def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str = "", 
+def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str = "",
                           return_date: str = "", truck: str = "", obj: str = "", contact_name: str = ""):
     """Записывает возврат поддонов в секцию ВОЗВРАТ ПОДДОНОВ (колонки X-AD) на листе клиента.
     
@@ -3072,14 +3080,17 @@ def _apply_pallet_return(client_name: str, return_pallets: int, pallet_type: str
             msg += f"\n+ Оплата бартер: {barter_sum} руб. ({checkbox}, строка {pay_row})"
             print(f"[RETURN] Оплата бартер: {barter_sum} руб. ({checkbox}) в строку {pay_row}", flush=True)
         except Exception as pe:
-            msg += f"\n⚠️ Возврат записан, но оплату-бартер не удалось: {pe}"
+            msg += f"\n❌ Возврат поддонов записан, но оплата-бартер УПАЛА: {pe}"
             print(f"[RETURN] Ошибка оплаты-бартер: {pe}", flush=True)
+            _alert_admin(f"Возврат поддонов: бартер не записан (поддон уже записан в строку {pay_row})", pe)
+            return False, msg
 
         return True, msg
 
     except Exception as e:
         msg = f"Ошибка: {e}"
         print(f"[RETURN] {msg}", flush=True)
+        _alert_admin("Возврат поддонов: критическая ошибка", e)
         return False, msg
 def _apply_object_add(client_name: str, object_name: str):
     """Добавляет объект в справочник клиента (колонка AM)."""
@@ -3133,6 +3144,7 @@ def _apply_object_add(client_name: str, object_name: str):
     except Exception as e:
         msg = f"Ошибка: {e}"
         print(f"[OBJ_ADD] {msg}", flush=True)
+        _alert_admin(f"Добавление объекта для '{client_name}': ошибка Sheets", e)
         return False, msg
 def _dates_match(d1: str, d2: str) -> bool:
     """Сравнивает две даты в произвольном формате (ДД.ММ.ГГГГ, ДД.ММ.ГГ, ГГГГ-ММ-ДД)."""
@@ -3219,6 +3231,7 @@ def _apply_payment_edit(client_name: str, contact_name: str, edit_date: str = ""
     except Exception as e:
         msg = f"Ошибка: {e}"
         print(f"[PAY_EDIT] {msg}", flush=True)
+        _alert_admin(f"Правка оплаты для '{client_name}': ошибка Sheets", e)
         return False, msg
 def _confirm_accounting_events(events: list, sender_name: str):
     """Отправляет подтверждение по бухгалтерским командам в группу."""
@@ -3412,6 +3425,7 @@ def _write_accounting_to_sheets(events: list):
             print(f'[ACCOUNTING_SHEETS] Добавлено: {row}', flush=True)
     except Exception as e:
         print(f'[ACCOUNTING_SHEETS] Ошибка: {e}', flush=True)
+        _alert_admin("Бухгалтерия: ошибка записи событий в Sheets", e)
 def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     """Основная точка входа для сообщений из группы производства."""
     _log_blok_message(sender_name, text, raw_msg)
