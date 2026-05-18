@@ -3518,13 +3518,16 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
         _dedup_cache[_text_dedup_key] = time.time()
         _save_dedup_cache(_dedup_cache)
 
-    # Рейсы/возвраты/цены → в Sheets
-    sheet_events = [t for t in trips if t.get('type') in ('trip', 'return', 'price')]
+    # Рейсы/возвраты/цены/перемещения поддонов → в Sheets
+    # pallet_transfer: пишется в «Рейсы» (БЕЗ списания со склада — это пустые поддоны)
+    sheet_events = [t for t in trips if t.get('type') in ('trip', 'return', 'price', 'pallet_transfer')]
     if sheet_events:
         _write_trips_to_sheets(sheet_events)
 
-    # Бухгалтерские события → подтверждение в чат (рейсы уже подтверждены в _write_trips_to_sheets)
-    non_trip_events = [t for t in trips if t.get('type') not in ('trip', 'return')]
+    # Бухгалтерские события → подтверждение в чат
+    # Исключаем: trip/return (уже подтверждаются в _write_trips_to_sheets) +
+    # pallet_transfer (тоже подтверждается там же — иначе двойное уведомление)
+    non_trip_events = [t for t in trips if t.get('type') not in ('trip', 'return', 'pallet_transfer')]
     if non_trip_events:
         _confirm_accounting_events(non_trip_events, sender_name)
 def process_update(update: dict):
