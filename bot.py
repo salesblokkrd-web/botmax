@@ -2082,6 +2082,27 @@ def _debug_log_chat(chat_id: int, sender: str, text_preview: str):
     except Exception:
         pass
 
+def _normalize_location_for_dedup(loc: str) -> str:
+    """Нормализует from_location для дедупликации.
+
+    Цель: «Тихорецкая», «КРД», «Карьер» — это всё НАШИ объекты, должны давать
+    одинаковый ключ (Claude может вернуть любой из этих вариантов для одного рейса).
+    А вот «Великовечное», «Белореченск», «ИП Евсеев» — это РАЗНЫЕ поставщики,
+    они должны давать разные ключи (иначе две закупки в один день потеряются).
+    """
+    if not loc:
+        return ''
+    s = loc.lower().strip()
+    # Наши собственные объекты — унифицируем
+    our_keywords = ['тихорец', 'крд', 'краснодар', 'карьер', 'архип', 'наш', 'свой склад']
+    if any(kw in s for kw in our_keywords):
+        return '_ours_'
+    # Generic «закупка» без имени поставщика — отдельная корзина
+    if s in ('закуп', 'закупка', 'закупили'):
+        return '_purchase_generic_'
+    # Иначе — это имя поставщика, оставляем как есть
+    return s
+
 def _dedup_check(event: dict) -> bool:
     """Проверяет, не было ли это событие уже обработано за последние 24ч.
     Возвращает True если ДУБЛИКАТ (уже было), False если новое."""
@@ -2093,8 +2114,9 @@ def _dedup_check(event: dict) -> bool:
         for k in expired:
             del _dedup_cache[k]
         # Хеш по ключевым полям события
-        # ВАЖНО: from_location ИСКЛЮЧЁН из хеша — Claude может возвращать разные варианты
-    # ("Тихорецкая" vs "КРД" vs "закупка") для одного и того же рейса
+        # from_location — нормализуется через _normalize_location_for_dedup:
+        # наши склады (Тихорецкая/КРД/Карьер) сводятся к одному ключу,
+        # а реальные поставщики (Великовечное и т.д.) различаются между собой.
         key_parts = [
             event.get('type') or '',
             event.get('date') or '',
@@ -2103,7 +2125,7 @@ def _dedup_check(event: dict) -> bool:
             str(event.get('price') or event.get('price_new') or ''),
             event.get('driver') or '',
             event.get('truck') or '',
-            # from_location — НЕ включаем (нестабильное поле)
+            _normalize_location_for_dedup(event.get('from_location') or ''),
             event.get('to_location') or '',
             event.get('price_contact') or '',
             event.get('price_date_from') or '',
