@@ -2493,6 +2493,81 @@ def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, tr
         _alert_admin(f"Склад: ошибка записи в {sheet_name}", e)
         return False, f"Ошибка записи в {sheet_name}: {e}"
 
+def _write_purchase_to_sheets(trip: dict):
+    """Записывает закупку блока в лист 'Закупки'.
+
+    Колонки (A-R):
+    A=№, B=Дата закупки, C=Поставщик, D=Откуда, E=Продукция,
+    F=Кол-во шт, G=Кол-во подд, H=Цена закупки руб/шт, I=Сумма закупки,
+    J=Доставка от поставщика, K=Клиент, L=Дата продажи, M=Цена продажи руб/шт,
+    N=Сумма продажи, O=Доставка клиенту, P=Итого расходы, Q=Маржа руб, R=Маржа %.
+
+    При закупке знаем: дата, поставщик/откуда, продукт, кол-во. Остальное — позже руками.
+    """
+    if not GOOGLE_SA_B64:
+        return False, "Нет GOOGLE_SA_B64"
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_info = json.loads(base64.b64decode(GOOGLE_SA_B64))
+        creds = Credentials.from_service_account_info(
+            sa_info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+        ws = sh.worksheet("Закупки")
+
+        # Последний № из колонки A (начиная с строки 4 — после заголовка в 3-й)
+        all_vals = ws.col_values(1)
+        last_num = 0
+        for v in all_vals:
+            if v.isdigit():
+                last_num = max(last_num, int(v))
+        new_num = last_num + 1
+
+        # Откуда и поставщик — из from_location. Если есть отдельное поле supplier — используем.
+        from_loc = trip.get("from_location") or ""
+        supplier = trip.get("supplier") or from_loc
+
+        product = trip.get("product") or ""
+        pallets = trip.get("pallets") or ""
+        pieces = trip.get("pieces") or ""
+
+        # Если кол-во штук не задано — пытаемся посчитать из products_detail
+        if not pieces and trip.get("products_detail"):
+            try:
+                pieces = sum(int(p.get("pieces", 0) or 0) for p in trip["products_detail"])
+                if pieces == 0:
+                    pieces = ""
+            except Exception:
+                pieces = ""
+
+        row = [
+            str(new_num),                               # A: №
+            trip.get("date") or _today_msk(),           # B: Дата закупки
+            supplier,                                    # C: Поставщик
+            from_loc,                                    # D: Откуда
+            product,                                     # E: Продукция
+            str(pieces) if pieces else "",              # F: Кол-во, шт
+            str(pallets) if pallets else "",            # G: Кол-во, подд
+            "", "", "",                                  # H-J: цены/сумма/доставка — позже
+            trip.get("to_location") or "",              # K: Клиент (куда доставили)
+            "", "", "", "", "", "", "",                # L-R: продажа/маржа — позже
+        ]
+        # find_first_empty_row: append после последней непустой
+        # Используем USER_ENTERED чтобы даты воспринимались как даты
+        ws.append_row(row, value_input_option="USER_ENTERED")
+
+        msg = f"📥 Закупка #{new_num}: {product} {pallets}пд от {supplier} → {trip.get('to_location') or 'склад'}"
+        print(f"[PURCHASE] {row}", flush=True)
+        return True, msg
+    except Exception as e:
+        print(f"[PURCHASE] Ошибка: {e}", flush=True)
+        _alert_admin("Ошибка записи в лист Закупки", e)
+        return False, str(e)
+
 def _write_trips_to_sheets(trips: list):
     """Записывает рейсы в лист 'Рейсы' Google Sheets через gspread."""
     if not trips or not GOOGLE_SA_B64:
@@ -2608,6 +2683,16 @@ def _write_trips_to_sheets(trips: list):
             trip_source = (trip.get("source") or "").lower()
             from_loc = (trip.get("from_location") or "").lower()
             is_purchase = trip_source == "закуп" or "закуп" in from_loc
+
+            # Закупка → пишем в лист «Закупки» (отдельно от Рейсов)
+            if is_purchase:
+                try:
+                    pur_ok, pur_msg = _write_purchase_to_sheets(trip)
+                    if pur_ok:
+                        send_msg(BLOK_GROUP_ID, pur_msg)
+                except Exception as e:
+                    print(f"[PURCHASE] Ошибка: {e}", flush=True)
+
             if product and trip.get("from_location") and not is_purchase:
                 trip_pallets = trip.get("pallets")
                 p_detail = trip.get("products_detail")
