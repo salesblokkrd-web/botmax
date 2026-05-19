@@ -84,6 +84,21 @@ TRUCK_SHORTCUTS = {
     "638": "р638хн 123",
 }
 
+# Жёсткая привязка машины → штатному водителю.
+# Если в сообщении упомянута только машина (без водителя) — бот подставит водителя сам.
+TRUCK_TO_DRIVER = {
+    "у135рх 193": "Кораблев М.Н.",
+    "р319ок 123": "Адлейба А.Ю.",
+    "р638хн 123": "Кислицин А.С.",
+}
+
+def _driver_for_truck(truck: str) -> str:
+    """Возвращает штатного водителя для машины (по полному номеру или сокращению)."""
+    if not truck:
+        return ""
+    full = TRUCK_SHORTCUTS.get(truck.strip(), truck.strip())
+    return TRUCK_TO_DRIVER.get(full, "")
+
 # Дедупликация: персистентный кеш на диске (выживает перезапуск бота)
 _DEDUP_FILE = os.path.join(DATA_DIR, "dedup_cache.json")
 _DEDUP_TTL = 86400  # 24 часа в секундах
@@ -3012,6 +3027,83 @@ def _write_purchase_to_sheets(trip: dict):
         _alert_admin("Ошибка записи в лист Закупки", e)
         return False, str(e)
 
+def _trip_date_to_sortkey(date_str: str):
+    """Конвертирует строку даты ДД.ММ.ГГГГ в сортируемый кортеж (Y,M,D).
+    Если не парсится — возвращает None (тогда строка идёт в конец)."""
+    if not date_str:
+        return None
+    try:
+        parts = date_str.strip().split('.')
+        if len(parts) == 3:
+            d, m, y = parts
+            return (int(y), int(m), int(d))
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
+def _insert_trip_calendar(ws, row_data: list, date_str: str, data_start_row: int = 3) -> int:
+    """Вставляет строку рейса в правильное место по календарю + перенумеровывает.
+
+    Returns: финальный номер вставленной записи (после перенумерации).
+    """
+    target_key = _trip_date_to_sortkey(date_str)
+    if target_key is None:
+        # Без даты — в конец
+        ws.append_row(row_data, value_input_option='USER_ENTERED')
+        all_a = ws.col_values(1)
+        return sum(1 for v in all_a if v.strip().isdigit())
+
+    # Находим позицию вставки — первая строка с датой строго больше нашей
+    all_rows = ws.get_all_values()
+    insert_at = None
+    for i, r in enumerate(all_rows, start=1):
+        if i < data_start_row + 1:
+            continue
+        if not r or not r[0].strip().isdigit():
+            continue  # не рейс (заголовок/пусто)
+        row_date = r[1] if len(r) > 1 else ''
+        row_key = _trip_date_to_sortkey(row_date)
+        if row_key is None:
+            continue
+        if row_key > target_key:
+            insert_at = i
+            break
+
+    if insert_at is None:
+        # Не нашли строку с большей датой — добавляем после последнего рейса
+        last_trip_row = 0
+        for i, r in enumerate(all_rows, start=1):
+            if r and r[0].strip().isdigit():
+                last_trip_row = i
+        insert_at = last_trip_row + 1 if last_trip_row else (data_start_row + 1)
+
+    ws.insert_row(row_data, index=insert_at, value_input_option='USER_ENTERED')
+
+    # Перенумеровываем все рейсы по порядку
+    all_rows = ws.get_all_values()
+    n = 0
+    updates_batch = []
+    for i, r in enumerate(all_rows, start=1):
+        if not r:
+            continue
+        # Считаем «рейсом» строку где есть дата в формате ДД.ММ.ГГГГ
+        if len(r) > 1 and _trip_date_to_sortkey(r[1]) is not None:
+            n += 1
+            if r[0].strip() != str(n):
+                updates_batch.append({'range': f'A{i}', 'values': [[str(n)]]})
+
+    if updates_batch:
+        ws.batch_update(updates_batch, value_input_option='USER_ENTERED')
+
+    # Возвращаем итоговый № вставленной строки (строка теперь на insert_at)
+    final_num = ws.cell(insert_at, 1).value
+    try:
+        return int(final_num)
+    except (ValueError, TypeError):
+        return n
+
+
 def _write_trips_to_sheets(trips: list):
     """Записывает рейсы в лист 'Рейсы' Google Sheets через gspread."""
     if not trips or not GOOGLE_SA_B64:
@@ -3029,7 +3121,7 @@ def _write_trips_to_sheets(trips: list):
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(SHEETS_ID)
         ws = sh.worksheet("Рейсы")
-        # Получаем последний номер записи
+        # Получаем последний номер записи (для fallback и confirm-сообщений до перенумерации)
         all_vals = ws.col_values(1)
         last_num = 0
         for v in all_vals:
@@ -3040,6 +3132,11 @@ def _write_trips_to_sheets(trips: list):
             # Нормализуем номер машины (сокращения → полный)
             if trip.get('truck'):
                 trip['truck'] = _normalize_truck(trip['truck'])
+            # Автоподстановка водителя по машине — если в сообщении только машина (135 → Кораблев)
+            if trip.get('truck') and not trip.get('driver'):
+                auto_driver = _driver_for_truck(trip['truck'])
+                if auto_driver:
+                    trip['driver'] = auto_driver
             evt_type = trip.get("type", "trip")
             last_num += 1
 
@@ -3050,22 +3147,26 @@ def _write_trips_to_sheets(trips: list):
             elif evt_type == "pallet_transfer":
                 # Перемещение поддонов между складами → пишем в Рейсы, НЕ трогаем склад
                 product_desc = f"Поддоны {trip.get('pallets', '')} шт"
+                trip_date = trip.get("date") or _today_msk()
                 row = [
-                    str(last_num),
-                    trip.get("date") or _today_msk(),
+                    '',  # № проставится при перенумерации
+                    trip_date,
                     trip.get("truck") or "",
                     trip.get("driver") or "",
                     trip.get("from_location") or "",
                     trip.get("to_location") or "",
                     trip.get("client") or trip.get("to_location") or "",
                     product_desc,
+                    'перемещение',  # I: Источник
+                    trip.get("driver") or "",  # J: Водители
                 ]
-                ws.append_row(row, value_input_option="USER_ENTERED")
-                confirm = f"✅ Перемещение #{last_num}: {trip.get('driver','')} ({trip.get('truck','')})"
+                final_num = _insert_trip_calendar(ws, row, trip_date)
+                last_num = max(last_num, final_num)
+                confirm = f"✅ Перемещение #{final_num}: {trip.get('driver','')} ({trip.get('truck','')})"
                 confirm += f"\n{trip.get('from_location','')} → {trip.get('to_location','')}"
-                confirm += f"\nПоддоны: {trip.get('pallets', '?')} шт"
+                confirm += f"\nПоддоны: {trip.get('pallets', '?')} шт | дата: {trip_date}"
                 send_msg(BLOK_GROUP_ID, confirm)
-                print(f"[BLOK_SHEETS] Перемещение поддонов: {row}", flush=True)
+                print(f"[BLOK_SHEETS] Перемещение поддонов вставлено по календарю: row={row}, num={final_num}", flush=True)
                 continue  # НЕ списываем со склада
             elif evt_type == "return":
                 # Возврат поддонов → пишем в секцию ВОЗВРАТ на листе клиента, НЕ в Рейсы
@@ -3092,9 +3193,10 @@ def _write_trips_to_sheets(trips: list):
                 # Рейс — формат продукции: "20(3-0)" или "20(3-0)+9(2-0)"
                 # Парсер возвращает product в правильном формате, pallets уже внутри
                 product = trip.get("product") or ""
+                trip_date = trip.get("date") or _today_msk()
                 row = [
-                    str(last_num),
-                    trip.get("date") or _today_msk(),
+                    '',  # № проставится при перенумерации
+                    trip_date,
                     trip.get("truck") or "",
                     trip.get("driver") or "",
                     trip.get("from_location") or "",
@@ -3111,15 +3213,18 @@ def _write_trips_to_sheets(trips: list):
             if truck and truck not in VALID_TRUCKS:
                 warnings.append(f"неизвестная машина '{truck}'")
 
-            ws.append_row(row, value_input_option="USER_ENTERED")
+            final_num = _insert_trip_calendar(ws, row, trip_date)
+            last_num = max(last_num, final_num)
             # Подтверждение в группу
-            confirm = f"✅ Рейс #{last_num}: {driver} ({truck})\n"
+            confirm = f"✅ Рейс #{final_num}: {driver} ({truck})\n"
             confirm += f"{trip.get('from_location','')} → {trip.get('to_location','')} | {trip.get('client','')}\n"
-            confirm += f"Продукция: {row[-1]}"
+            confirm += f"Продукция: {row[-1]} | дата: {trip_date}"
             if warnings:
                 confirm += "\n⚠️ " + ", ".join(warnings)
             send_msg(BLOK_GROUP_ID, confirm)
-            print(f"[BLOK_SHEETS] Добавлен {evt_type}: {row}", flush=True)
+            print(f"[BLOK_SHEETS] Рейс {evt_type} вставлен по календарю: row={row}, num={final_num}", flush=True)
+            # Заменяем last_num на final_num чтобы остальной код работал с правильным номером
+            last_num = final_num
 
             # ─── Складской учёт: списание со склада ───
             # Записываем в КРД(склад) или Карьер(склад) кол-во отгруженных поддонов
