@@ -2089,10 +2089,18 @@ def _normalize_location_for_dedup(loc: str) -> str:
     одинаковый ключ (Claude может вернуть любой из этих вариантов для одного рейса).
     А вот «Великовечное», «Белореченск», «ИП Евсеев» — это РАЗНЫЕ поставщики,
     они должны давать разные ключи (иначе две закупки в один день потеряются).
+
+    Также «Великовечное» и «Великовечное (ИП Евсеев)» — это ОДНО место,
+    просто менеджер уточнил поставщика в скобках. Скобки и всё в них режем.
     """
+    import re as _re
     if not loc:
         return ''
     s = loc.lower().strip()
+    # Убираем уточнения в скобках: "Великовечное (ИП Евсеев)" → "Великовечное"
+    s = _re.sub(r'\s*\([^)]*\)\s*', '', s).strip()
+    # Убираем повторные пробелы
+    s = _re.sub(r'\s+', ' ', s)
     # Наши собственные объекты — унифицируем
     our_keywords = ['тихорец', 'крд', 'краснодар', 'карьер', 'архип', 'наш', 'свой склад']
     if any(kw in s for kw in our_keywords):
@@ -2578,15 +2586,39 @@ def _write_purchase_to_sheets(trip: dict):
             trip.get("to_location") or "",              # K: Клиент (куда доставили)
             "", "", "", "", "", "", "",                # L-R: продажа/маржа — позже
         ]
-        # find_first_empty_row: append после последней непустой
-        # Используем USER_ENTERED чтобы даты воспринимались как даты
-        ws.append_row(row, value_input_option="USER_ENTERED")
+
+        # ВАЖНО: ws.append_row() в gspread использует Google Sheets values.append(),
+        # который ищет «таблицу» рядом и приписывает в её конец. Если в листе есть
+        # данные справа (например, в зоне X-AD от итогов/расчётов), запись уйдёт ТУДА,
+        # а не в основную таблицу. Поэтому используем явный insert_row перед строкой ИТОГО.
+        #
+        # Алгоритм:
+        # 1. Находим строку с ИТОГО (если есть) — вставляем строку ПЕРЕД ней
+        # 2. Если ИТОГО нет — находим первую пустую строку после заголовка (стр. 3)
+        col_a = ws.col_values(1)
+        insert_at = None
+        for i, v in enumerate(col_a, start=1):
+            if v.strip().upper() == "ИТОГО":
+                insert_at = i
+                break
+        if insert_at is None:
+            # Нет ИТОГО — ищем первую пустую строку после заголовка (после стр. 3)
+            insert_at = 4
+            for i in range(4, len(col_a) + 1):
+                if i - 1 < len(col_a) and not col_a[i - 1].strip():
+                    insert_at = i
+                    break
+            else:
+                insert_at = len(col_a) + 1
+
+        ws.insert_row(row, index=insert_at, value_input_option="USER_ENTERED")
 
         msg = f"📥 Закупка #{new_num}: {product} {pallets}пд от {supplier} → {trip.get('to_location') or 'склад'}"
-        print(f"[PURCHASE] {row}", flush=True)
+        print(f"[PURCHASE] row={row}, inserted_at_row={insert_at}", flush=True)
         return True, msg
     except Exception as e:
-        print(f"[PURCHASE] Ошибка: {e}", flush=True)
+        import traceback
+        print(f"[PURCHASE] Ошибка: {e}\n{traceback.format_exc()[:500]}", flush=True)
         _alert_admin("Ошибка записи в лист Закупки", e)
         return False, str(e)
 
