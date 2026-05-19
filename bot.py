@@ -2257,12 +2257,24 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 - target_num: номер записи (если назван в сообщении: "закупка #2", "рейс №5")
 - target_date: дата записи ДД.ММ.ГГГГ (если номер не назван, для поиска)
 - target_client: клиент (для уточнения поиска, если несколько записей в один день)
-- updates: словарь полей для обновления. Допустимые ключи:
-    • для Закупки: "поставщик", "откуда", "продукция", "шт", "подд",
-      "цена_закупки", "доставка_от_поставщика", "клиент", "дата_продажи",
-      "цена_продажи", "доставка_клиенту"
+- updates: словарь полей для обновления ОБЩИХ полей записи. Допустимые ключи:
+    • для Закупки (общие поля): "поставщик", "откуда", "продукция",
+      "доставка_от_поставщика", "клиент", "дата_продажи", "доставка_клиенту"
     • для Рейса: "дата", "машина", "водитель", "откуда", "куда", "организация", "продукция"
     • для Склада: "дата", "продукция", "поддоны"
+
+- details: МАССИВ объектов (ТОЛЬКО для Закупок если в одной закупке несколько блоков
+  с разными ценами/количеством). Каждый объект:
+    {"продукция": "20(3-0)", "шт": 810, "подд": 9, "цена_закупки": 39, "цена_продажи": 61}
+
+  Если в одной закупке ОДИН блок — details НЕ передавай, всё кладёшь в updates.
+  Если ДВА+ разных блоков с разными ценами — обязательно используй details для
+  каждого блока. updates тогда содержит только общие поля (поставщик, доставка и т.п.),
+  а блоки/количества/цены идут в details.
+
+КРИТИЧНО: если в сообщении НЕСКОЛЬКО правок (за разные даты или для разных закупок) —
+извлеки КАЖДУЮ как ОТДЕЛЬНОЕ событие correction. НЕ объединяй несколько правок в одно.
+Не пропускай ни одной — все 2, 3, 5 правок должны быть в результирующем массиве.
 
 Триггеры на correction в тексте: "поправь", "исправь", "правка", "уточнение",
 "дополни", "добавь к закупке", "обнови", "корректировка".
@@ -2301,8 +2313,18 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 "Дополни закупку #1 ценой продажи 55 руб/шт и датой продажи 14.05"
 → [{{"type":"correction","target_table":"Закупки","target_num":1,"updates":{{"цена_продажи":55,"дата_продажи":"14.05.2026"}}}}]
 
-"Корректировка закупки 14.05 ИП Горячкина — добавь 1000 шт, 15 поддонов, цена 41, доставка 15000"
-→ [{{"type":"correction","target_table":"Закупки","target_date":"14.05.2026","target_client":"ИП Горячкина","updates":{{"шт":1000,"подд":15,"цена_закупки":41,"доставка_от_поставщика":15000}}}}]
+"Корректировка закупки 14.05 ИП Горячкина — поставщик Великовечное, 20(3-0), 15 поддонов 1125 шт, цена 41, доставка 15000, цена продажи 60"
+→ [{{"type":"correction","target_table":"Закупки","target_date":"14.05.2026","target_client":"ИП Горячкина","updates":{{"поставщик":"Великовечное","откуда":"Великовечное","продукция":"20(3-0)","доставка_от_поставщика":15000,"клиент":"ИП Горячкина","дата_продажи":"14.05.2026"}},"details":[{{"продукция":"20(3-0)","шт":1125,"подд":15,"цена_закупки":41,"цена_продажи":60}}]}}]
+
+ПРАВКА С НЕСКОЛЬКИМИ БЛОКАМИ (используется details для каждого блока):
+"Исправить Закупки от 13.05, поставщик ИП Евсеев, Великовечное, Блок 20(3-0) - 9 подд по 90 шт/подд, цена закупки 39 руб, + 12(2-0) - 4 подд по 120 шт/подд, цена закупки 30 руб, Доставка от поставщика - 16000 руб на ИП Горячкина (пос. Южный, Кожедуба, 30) цена продажи: 20(3-0) - 61 руб, 12(2-0) - 48 руб."
+→ [{{"type":"correction","target_table":"Закупки","target_date":"13.05.2026","updates":{{"поставщик":"ИП Евсеев","откуда":"Великовечное","доставка_от_поставщика":16000,"клиент":"ИП Горячкина (пос. Южный, Кожедуба, 30)","дата_продажи":"13.05.2026"}},"details":[{{"продукция":"20(3-0)","шт":810,"подд":9,"цена_закупки":39,"цена_продажи":61}},{{"продукция":"12(2-0)","шт":480,"подд":4,"цена_закупки":30,"цена_продажи":48}}]}}]
+
+(В этом примере: 9 подд × 90 шт/подд = 810 шт; 4 подд × 120 шт/подд = 480 шт.
+Сам считай шт = подд × шт_на_поддон, если менеджер дал шт_на_поддон.)
+
+ПРАВКА НЕСКОЛЬКИХ ДНЕЙ В ОДНОМ СООБЩЕНИИ (ОБЯЗАТЕЛЬНО извлекай все):
+Если менеджер пишет «Исправить Закупки от 12.05 ... \\n Исправить Закупки от 13.05 ... \\n Исправить Закупки от 14.05 ...» — это ТРИ отдельных события correction, каждое со своими updates/details. Возвращай массив из 3 объектов, не один!
 
 Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
 
@@ -2311,7 +2333,7 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 
     body = json.dumps({
         "model": "claude-sonnet-4-6",
-        "max_tokens": 2048,
+        "max_tokens": 4096,  # увеличено для длинных правок с details и множественных событий
         "messages": [{"role": "user", "content": prompt}]
     }).encode()
     req = urllib.request.Request(
@@ -2673,7 +2695,7 @@ def _apply_correction(event: dict):
         if target_row is None:
             return False, f"Не нашёл запись в {table} (num={target_num}, date={target_date}, client={target_client})"
 
-        # Применяем обновления по полям
+        # Применяем обновления по полям (общие поля родителя)
         applied = []
         unknown = []
         for field, value in updates.items():
@@ -2686,6 +2708,89 @@ def _apply_correction(event: dict):
             ws.update(values=[[value]], range_name=f'{col_letter}{target_row}',
                       value_input_option='USER_ENTERED')
             applied.append(f"{field}={value}")
+
+        # === МНОГОПРОДУКТОВАЯ ПРАВКА (details) — только для Закупок ===
+        # Если в правке details=[{...}, {...}] — это закупка с 2+ блоками.
+        # Превращаем целевую строку в РОДИТЕЛЯ + создаём ДОЧЕРНИЕ строки 2.1, 2.2, ...
+        details = event.get("details") or []
+        if details and table == "Закупки":
+            parent_num = updates.get("номер") or target_num
+            if not parent_num:
+                # Берём текущее значение А
+                a_val = ws.cell(target_row, 1).value
+                try:
+                    parent_num = int(float(str(a_val).replace(",", ".")))
+                except (ValueError, TypeError):
+                    parent_num = None
+
+            if parent_num is None:
+                return False, f"Не определил № родителя для details (строка {target_row})"
+
+            # ШАГ 1: удаляем старые дочерние строки родителя (где А="N.X")
+            col_a_all = ws.col_values(1)
+            children_to_delete = []
+            for i, v in enumerate(col_a_all, start=1):
+                if v.strip().startswith(f"{parent_num}.") and i != target_row:
+                    children_to_delete.append(i)
+            # Удаляем сверху вниз (в обратном порядке)
+            for r_del in reversed(children_to_delete):
+                ws.delete_rows(r_del)
+
+            # ШАГ 2: пересчитываем target_row (мог сдвинуться если удаляли строки выше)
+            col_a_after_del = ws.col_values(1)
+            for i, v in enumerate(col_a_after_del, start=1):
+                if v.strip() == str(parent_num) and i >= config["data_start_row"]:
+                    target_row = i
+                    break
+
+            # ШАГ 3: вставляем N дочерних строк ПОСЛЕ родителя
+            n_children = len(details)
+            blank_rows = [[''] * 18 for _ in range(n_children)]
+            ws.insert_rows(blank_rows, row=target_row + 1, value_input_option='USER_ENTERED')
+
+            # ШАГ 4: заполняем дочерние строки и обновляем родителя
+            for i, det in enumerate(details):
+                child_row = target_row + 1 + i
+                child_id = f"{parent_num}.{i+1}"
+                # A — текстовый ID, B-D пустые, E=продукция, F=шт, G=подд, H=цена закупки
+                ws.update(values=[[child_id]], range_name=f'A{child_row}',
+                          value_input_option='RAW')
+                d_product = det.get("продукция") or det.get("продукт") or ""
+                d_pieces = det.get("шт") or det.get("штук") or ""
+                d_pallets = det.get("подд") or det.get("поддоны") or ""
+                d_price_buy = det.get("цена_закупки") or det.get("цена") or ""
+                d_price_sell = det.get("цена_продажи") or ""
+                ws.update(values=[['', '', '', d_product, d_pieces, d_pallets, d_price_buy]],
+                          range_name=f'B{child_row}:H{child_row}', value_input_option='USER_ENTERED')
+                ws.update(values=[[f'=IF(OR(F{child_row}="";H{child_row}="");"";F{child_row}*H{child_row})']],
+                          range_name=f'I{child_row}', value_input_option='USER_ENTERED')
+                ws.update(values=[['', '', '', d_price_sell]],
+                          range_name=f'J{child_row}:M{child_row}', value_input_option='USER_ENTERED')
+                ws.update(values=[[f'=IF(OR(F{child_row}="";M{child_row}="");"";F{child_row}*M{child_row})']],
+                          range_name=f'N{child_row}', value_input_option='USER_ENTERED')
+                # P, Q, R у дочки пусто (только у родителя)
+                ws.update(values=[['', '', '', '']],
+                          range_name=f'O{child_row}:R{child_row}', value_input_option='USER_ENTERED')
+
+            # ШАГ 5: обновляем родителя — F, G, I, N становятся SUMIF дочерних
+            r = target_row
+            ws.update(values=[[f'=SUMIF($A$4:$A$30;$A{r}&".*";$F$4:$F$30)']],
+                      range_name=f'F{r}', value_input_option='USER_ENTERED')
+            ws.update(values=[[f'=SUMIF($A$4:$A$30;$A{r}&".*";$G$4:$G$30)']],
+                      range_name=f'G{r}', value_input_option='USER_ENTERED')
+            ws.update(values=[['']], range_name=f'H{r}', value_input_option='USER_ENTERED')  # H пусто (разные цены)
+            ws.update(values=[[f'=SUMIF($A$4:$A$30;$A{r}&".*";$I$4:$I$30)']],
+                      range_name=f'I{r}', value_input_option='USER_ENTERED')
+            ws.update(values=[['']], range_name=f'M{r}', value_input_option='USER_ENTERED')  # M пусто
+            ws.update(values=[[f'=SUMIF($A$4:$A$30;$A{r}&".*";$N$4:$N$30)']],
+                      range_name=f'N{r}', value_input_option='USER_ENTERED')
+
+            # Продукция родителя = "20(3-0)+12(2-0)" из деталей
+            products_agg = "+".join(d.get("продукция") or d.get("продукт") or "" for d in details if d.get("продукция") or d.get("продукт"))
+            if products_agg:
+                ws.update(values=[[products_agg]], range_name=f'E{r}', value_input_option='USER_ENTERED')
+
+            applied.append(f"details={len(details)} блока: {products_agg}")
 
         msg = f"✏️ Правка {table} (строка {target_row}): " + ", ".join(applied)
         if unknown:
