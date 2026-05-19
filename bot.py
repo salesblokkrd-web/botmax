@@ -2526,13 +2526,24 @@ def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, tr
 def _write_purchase_to_sheets(trip: dict):
     """Записывает закупку блока в лист 'Закупки'.
 
-    Колонки (A-R):
-    A=№, B=Дата закупки, C=Поставщик, D=Откуда, E=Продукция,
-    F=Кол-во шт, G=Кол-во подд, H=Цена закупки руб/шт, I=Сумма закупки,
-    J=Доставка от поставщика, K=Клиент, L=Дата продажи, M=Цена продажи руб/шт,
-    N=Сумма продажи, O=Доставка клиенту, P=Итого расходы, Q=Маржа руб, R=Маржа %.
+    Структура листа:
+    - Строка 1: заголовок-merge
+    - Строка 3: шапка таблицы (A-R)
+    - Строки 4..N: записи закупок (заполняются СВЕРХУ ВНИЗ)
+    - Колонки I (Сумма закупки), N (Сумма продажи), P (Итого расходы),
+      Q (Маржа руб), R (Маржа %) — ФОРМУЛЫ, не трогать
+    - Строка с ИТОГО (обычно 32) — SUM(F4:F30) и т.п., тоже не трогать
 
-    При закупке знаем: дата, поставщик/откуда, продукт, кол-во. Остальное — позже руками.
+    Заполняем только: A=№, B=дата, C=поставщик, D=откуда, E=продукт,
+    F=шт, G=подд, H=цена закупки, J=доставка от поставщ., K=клиент,
+    L=дата продажи, M=цена продажи, O=доставка клиенту.
+
+    Алгоритм:
+    1. Найти строку ИТОГО (граница)
+    2. Найти ПЕРВУЮ пустую строку с 4 до ИТОГО-1
+    3. Если есть свободная — пишем туда через update (раздельно A:H, J:M, O —
+       НЕ затрагивая I, N, P, Q, R с формулами)
+    4. Если все заполнены — insert_row перед ИТОГО + восстанавливаем формулы
     """
     if not GOOGLE_SA_B64:
         return False, "Нет GOOGLE_SA_B64"
@@ -2549,23 +2560,42 @@ def _write_purchase_to_sheets(trip: dict):
         sh = gc.open_by_key(SHEETS_ID)
         ws = sh.worksheet("Закупки")
 
-        # Последний № из колонки A (начиная с строки 4 — после заголовка в 3-й)
-        all_vals = ws.col_values(1)
+        # 1. Находим ИТОГО
+        col_a = ws.col_values(1)
+        itogo_row = None
+        for i, v in enumerate(col_a, start=1):
+            if v.strip().upper() == "ИТОГО":
+                itogo_row = i
+                break
+
+        # 2. Находим последний номер и первую пустую строку
         last_num = 0
-        for v in all_vals:
-            if v.isdigit():
-                last_num = max(last_num, int(v))
+        target_row = None
+        max_search = itogo_row - 1 if itogo_row else 50
+        for i in range(4, max_search + 1):
+            cell_val = col_a[i - 1] if i - 1 < len(col_a) else ''
+            if cell_val.strip().isdigit():
+                last_num = max(last_num, int(cell_val.strip()))
+            elif target_row is None:
+                target_row = i
         new_num = last_num + 1
 
-        # Откуда и поставщик — из from_location. Если есть отдельное поле supplier — используем.
+        # 3. Если все строки до ИТОГО заполнены — вставляем перед ИТОГО
+        need_restore_formulas = False
+        if target_row is None:
+            if itogo_row:
+                target_row = itogo_row
+                ws.insert_row([], index=target_row, value_input_option="USER_ENTERED")
+                need_restore_formulas = True
+            else:
+                target_row = max_search + 1
+
+        # 4. Собираем данные
         from_loc = trip.get("from_location") or ""
         supplier = trip.get("supplier") or from_loc
-
         product = trip.get("product") or ""
         pallets = trip.get("pallets") or ""
         pieces = trip.get("pieces") or ""
-
-        # Если кол-во штук не задано — пытаемся посчитать из products_detail
         if not pieces and trip.get("products_detail"):
             try:
                 pieces = sum(int(p.get("pieces", 0) or 0) for p in trip["products_detail"])
@@ -2574,47 +2604,56 @@ def _write_purchase_to_sheets(trip: dict):
             except Exception:
                 pieces = ""
 
-        row = [
-            str(new_num),                               # A: №
-            trip.get("date") or _today_msk(),           # B: Дата закупки
-            supplier,                                    # C: Поставщик
-            from_loc,                                    # D: Откуда
-            product,                                     # E: Продукция
-            str(pieces) if pieces else "",              # F: Кол-во, шт
-            str(pallets) if pallets else "",            # G: Кол-во, подд
-            "", "", "",                                  # H-J: цены/сумма/доставка — позже
-            trip.get("to_location") or "",              # K: Клиент (куда доставили)
-            "", "", "", "", "", "", "",                # L-R: продажа/маржа — позже
+        # Цены — пока не парсятся, оставляем пустыми (потом руками)
+        price_buy = trip.get("price_buy") or ""
+        price_sell = trip.get("price_sell") or ""
+        delivery_in = trip.get("delivery_in") or ""
+        delivery_out = trip.get("delivery_out") or ""
+        sell_date = trip.get("sell_date") or ""
+
+        # 5. Пишем данные РАЗДЕЛЬНО, чтобы не затереть формулы I, N, P, Q, R
+        # A:H — 8 колонок (без I=формула)
+        ah_row = [
+            new_num,                                    # A
+            trip.get("date") or _today_msk(),           # B
+            supplier,                                    # C
+            from_loc,                                    # D
+            product,                                     # E
+            pieces,                                      # F
+            pallets,                                     # G
+            price_buy,                                   # H
         ]
+        ws.update(values=[ah_row], range_name=f'A{target_row}:H{target_row}', value_input_option='USER_ENTERED')
 
-        # ВАЖНО: ws.append_row() в gspread использует Google Sheets values.append(),
-        # который ищет «таблицу» рядом и приписывает в её конец. Если в листе есть
-        # данные справа (например, в зоне X-AD от итогов/расчётов), запись уйдёт ТУДА,
-        # а не в основную таблицу. Поэтому используем явный insert_row перед строкой ИТОГО.
-        #
-        # Алгоритм:
-        # 1. Находим строку с ИТОГО (если есть) — вставляем строку ПЕРЕД ней
-        # 2. Если ИТОГО нет — находим первую пустую строку после заголовка (стр. 3)
-        col_a = ws.col_values(1)
-        insert_at = None
-        for i, v in enumerate(col_a, start=1):
-            if v.strip().upper() == "ИТОГО":
-                insert_at = i
-                break
-        if insert_at is None:
-            # Нет ИТОГО — ищем первую пустую строку после заголовка (после стр. 3)
-            insert_at = 4
-            for i in range(4, len(col_a) + 1):
-                if i - 1 < len(col_a) and not col_a[i - 1].strip():
-                    insert_at = i
-                    break
-            else:
-                insert_at = len(col_a) + 1
+        # J:M — 4 колонки (между I-формулой и N-формулой)
+        jm_row = [
+            delivery_in,                                 # J
+            trip.get("to_location") or "",              # K
+            sell_date,                                   # L
+            price_sell,                                  # M
+        ]
+        ws.update(values=[jm_row], range_name=f'J{target_row}:M{target_row}', value_input_option='USER_ENTERED')
 
-        ws.insert_row(row, index=insert_at, value_input_option="USER_ENTERED")
+        # O — отдельная колонка (между N-формулой и P-формулой)
+        if delivery_out:
+            ws.update(values=[[delivery_out]], range_name=f'O{target_row}', value_input_option='USER_ENTERED')
 
-        msg = f"📥 Закупка #{new_num}: {product} {pallets}пд от {supplier} → {trip.get('to_location') or 'склад'}"
-        print(f"[PURCHASE] row={row}, inserted_at_row={insert_at}", flush=True)
+        # 6. Если делали insert_row — формулы не унаследовались, восстанавливаем
+        if need_restore_formulas:
+            r = target_row
+            ws.update(values=[[f'=IF(OR(F{r}="";H{r}="");"";F{r}*H{r})']],
+                      range_name=f'I{r}', value_input_option='USER_ENTERED')
+            ws.update(values=[[f'=IF(OR(F{r}="";M{r}="");"";F{r}*M{r})']],
+                      range_name=f'N{r}', value_input_option='USER_ENTERED')
+            ws.update(values=[[f'=IF(I{r}="";"";I{r}+IF(J{r}="";0;J{r})+IF(O{r}="";0;O{r}))']],
+                      range_name=f'P{r}', value_input_option='USER_ENTERED')
+            ws.update(values=[[f'=IF(OR(N{r}="";P{r}="");"";N{r}-P{r})']],
+                      range_name=f'Q{r}', value_input_option='USER_ENTERED')
+            ws.update(values=[[f'=IF(OR(N{r}="";N{r}=0;Q{r}="");"";ROUND(Q{r}/N{r}*100;1))']],
+                      range_name=f'R{r}', value_input_option='USER_ENTERED')
+
+        msg = f"📥 Закупка #{new_num}: {product} {pallets}пд от {supplier} → {trip.get('to_location') or 'склад'} [строка {target_row}]"
+        print(f"[PURCHASE] row#{new_num} → A{target_row}, data={ah_row}", flush=True)
         return True, msg
     except Exception as e:
         import traceback
