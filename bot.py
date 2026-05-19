@@ -2225,7 +2225,8 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 - type: "trip" (рейс/доставка), "return" (возврат поддонов), "price" (изменение цены),
         "client_add" (новый клиент), "client_edit" (изменение данных клиента),
         "object_add" (добавить объект клиенту), "payment_info" (информация об оплате),
-        "pallet_transfer" (перемещение поддонов между складами — НЕ блоков, а пустых поддонов)
+        "pallet_transfer" (перемещение поддонов между складами — НЕ блоков, а пустых поддонов),
+        "correction" (ПРАВКА ранее внесённой записи в Sheets — рейс/закупка/склад)
 - date: дата ДД.ММ.ГГГГ (если не указана — сегодня {msg_date or _today_msk()})
 - driver: ФИО водителя (из списка выше, по фамилии)
 - truck: гос.номер машины (из списка выше)
@@ -2251,6 +2252,21 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 - payment_method: "ИП" или "ООО" (куда оплатили, для type=payment_info)
 - comment: доп. информация, которая не вписывается в другие поля
 
+ПРАВКИ (type="correction") — для дописывания/исправления уже занесённых записей:
+- target_table: "Закупки" | "Рейсы" | "Склад"
+- target_num: номер записи (если назван в сообщении: "закупка #2", "рейс №5")
+- target_date: дата записи ДД.ММ.ГГГГ (если номер не назван, для поиска)
+- target_client: клиент (для уточнения поиска, если несколько записей в один день)
+- updates: словарь полей для обновления. Допустимые ключи:
+    • для Закупки: "поставщик", "откуда", "продукция", "шт", "подд",
+      "цена_закупки", "доставка_от_поставщика", "клиент", "дата_продажи",
+      "цена_продажи", "доставка_клиенту"
+    • для Рейса: "дата", "машина", "водитель", "откуда", "куда", "организация", "продукция"
+    • для Склада: "дата", "продукция", "поддоны"
+
+Триггеры на correction в тексте: "поправь", "исправь", "правка", "уточнение",
+"дополни", "добавь к закупке", "обнови", "корректировка".
+
 ПРИМЕРЫ сообщений бухгалтера:
 "Надо изменить цену у МеликсетянТ на Блок 390х190х188 /3 с дост. с 24.04.26г. на 61,00 руб"
 → [{{"type":"price","client":"МеликсетянТ","price_product":"Блок 390х190х188 /3 с дост.","price_new":61.0,"price_date_from":"24.04.2026"}}]
@@ -2274,6 +2290,19 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 
 "Надо внести изменения в ЧАСТНИКИ оплата от 20.04.2026 г. клиент ИП Шубина"
 → [{{"type":"client_edit","client":"ЧАСТНИКИ","price_contact":"ИП Шубина","date":"20.04.2026","comment":"ИП Шубина — изменение оплаты от 20.04.2026"}}]
+
+ПРИМЕРЫ ПРАВОК:
+"Поправь закупку #2 от 13.05 — поставщик Великовечное, цена закупки 40, 20 поддонов 1500 шт, доставка от поставщика 18000"
+→ [{{"type":"correction","target_table":"Закупки","target_num":2,"target_date":"13.05.2026","updates":{{"поставщик":"Великовечное","цена_закупки":40,"подд":20,"шт":1500,"доставка_от_поставщика":18000}}}}]
+
+"Исправь рейс #5 — водитель не Кораблев, а Адлейба"
+→ [{{"type":"correction","target_table":"Рейсы","target_num":5,"updates":{{"водитель":"Адлейба А.Ю.","машина":"р319ок 123"}}}}]
+
+"Дополни закупку #1 ценой продажи 55 руб/шт и датой продажи 14.05"
+→ [{{"type":"correction","target_table":"Закупки","target_num":1,"updates":{{"цена_продажи":55,"дата_продажи":"14.05.2026"}}}}]
+
+"Корректировка закупки 14.05 ИП Горячкина — добавь 1000 шт, 15 поддонов, цена 41, доставка 15000"
+→ [{{"type":"correction","target_table":"Закупки","target_date":"14.05.2026","target_client":"ИП Горячкина","updates":{{"шт":1000,"подд":15,"цена_закупки":41,"доставка_от_поставщика":15000}}}}]
 
 Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
 
@@ -2522,6 +2551,153 @@ def _apply_warehouse_shipment(from_location: str, product: str, pallets: int, tr
         print(f"[WAREHOUSE] Ошибка записи в {sheet_name}: {e}", flush=True)
         _alert_admin(f"Склад: ошибка записи в {sheet_name}", e)
         return False, f"Ошибка записи в {sheet_name}: {e}"
+
+def _apply_correction(event: dict):
+    """Применяет правку к существующей записи в Sheets.
+
+    event = {
+        type: "correction",
+        target_table: "Закупки" | "Рейсы" | "Склад",
+        target_num: int (опционально),
+        target_date: "ДД.ММ.ГГГГ" (опционально),
+        target_client: str (опционально),
+        updates: {"поле": значение, ...}
+    }
+
+    Возвращает (success: bool, message: str).
+    """
+    if not GOOGLE_SA_B64:
+        return False, "Нет GOOGLE_SA_B64"
+
+    table = (event.get("target_table") or "").strip()
+    target_num = event.get("target_num")
+    target_date = (event.get("target_date") or "").strip()
+    target_client = (event.get("target_client") or "").strip()
+    updates = event.get("updates") or {}
+
+    if not table:
+        return False, "Не указана таблица для правки"
+    if not updates:
+        return False, "Нет полей для обновления"
+
+    # Маппинг таблиц → имя листа + правила поиска строки + маппинг полей → колонки
+    SHEET_CONFIG = {
+        "Закупки": {
+            "sheet": "Закупки",
+            "num_col": 1,        # A — № записи
+            "date_col": 2,       # B — дата
+            "client_col": 11,    # K — клиент
+            "data_start_row": 4, # с какой строки начинаются данные
+            "fields": {
+                "поставщик": 3,                   # C
+                "откуда": 4,                       # D
+                "продукция": 5,                    # E
+                "шт": 6,                           # F
+                "кол-во_шт": 6,
+                "подд": 7,                         # G
+                "кол-во_подд": 7,
+                "поддоны": 7,
+                "цена_закупки": 8,                 # H
+                "доставка_от_поставщика": 10,     # J
+                "доставка_поставщик": 10,
+                "клиент": 11,                      # K
+                "дата_продажи": 12,                # L
+                "цена_продажи": 13,                # M
+                "доставка_клиенту": 15,           # O
+                "доставка_клиент": 15,
+            },
+        },
+        "Рейсы": {
+            "sheet": "Рейсы",
+            "num_col": 1,        # A — № п/п
+            "date_col": 2,       # B — Дата
+            "client_col": 7,     # G — Организация
+            "data_start_row": 3, # шапка в 2-й строке
+            "fields": {
+                "дата": 2,                         # B
+                "машина": 3,                       # C
+                "номер_машины": 3,
+                "водитель": 4,                     # D
+                "откуда": 5,                       # E
+                "куда": 6,                         # F
+                "организация": 7,                  # G
+                "клиент": 7,
+                "продукция": 8,                    # H
+                "источник": 9,                     # I
+            },
+        },
+    }
+
+    config = SHEET_CONFIG.get(table)
+    if not config:
+        return False, f"Неизвестная таблица: {table}"
+
+    try:
+        import base64
+        import gspread
+        from google.oauth2.service_account import Credentials
+        sa_info = json.loads(base64.b64decode(GOOGLE_SA_B64))
+        creds = Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEETS_ID)
+        ws = sh.worksheet(config["sheet"])
+
+        # Поиск строки: сначала по target_num, потом по date+client
+        target_row = None
+        if target_num is not None:
+            col_a = ws.col_values(config["num_col"])
+            num_str = str(target_num).strip()
+            for i, v in enumerate(col_a, start=1):
+                if v.strip() == num_str and i >= config["data_start_row"]:
+                    target_row = i
+                    break
+
+        if target_row is None and target_date:
+            col_date = ws.col_values(config["date_col"])
+            col_client = ws.col_values(config["client_col"]) if target_client else []
+            for i, v in enumerate(col_date, start=1):
+                if i < config["data_start_row"]:
+                    continue
+                if target_date in v.strip():
+                    if target_client:
+                        client_in_row = col_client[i-1] if i-1 < len(col_client) else ""
+                        if target_client.lower() in client_in_row.lower():
+                            target_row = i
+                            break
+                    else:
+                        target_row = i
+                        break
+
+        if target_row is None:
+            return False, f"Не нашёл запись в {table} (num={target_num}, date={target_date}, client={target_client})"
+
+        # Применяем обновления по полям
+        applied = []
+        unknown = []
+        for field, value in updates.items():
+            field_norm = field.lower().strip().replace(" ", "_")
+            col_idx = config["fields"].get(field_norm)
+            if col_idx is None:
+                unknown.append(field)
+                continue
+            col_letter = chr(64 + col_idx) if col_idx <= 26 else "A" + chr(64 + col_idx - 26)
+            ws.update(values=[[value]], range_name=f'{col_letter}{target_row}',
+                      value_input_option='USER_ENTERED')
+            applied.append(f"{field}={value}")
+
+        msg = f"✏️ Правка {table} (строка {target_row}): " + ", ".join(applied)
+        if unknown:
+            msg += f"\n⚠️ Неизвестные поля: {', '.join(unknown)}"
+        print(f"[CORRECTION] {msg}", flush=True)
+        return True, msg
+
+    except Exception as e:
+        import traceback
+        print(f"[CORRECTION] Ошибка: {e}\n{traceback.format_exc()[:500]}", flush=True)
+        _alert_admin(f"Ошибка правки в {table}", e)
+        return False, str(e)
 
 def _write_purchase_to_sheets(trip: dict):
     """Записывает закупку блока в лист 'Закупки'.
@@ -3647,16 +3823,22 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
         # Подтверждения выполнения
         "выполнен", "доставлен", "отгружен", "загружен", "разгрузил", "приехал",
     )
-    if not any(kw in text_lower for kw in keywords):
+    # Триггеры правок — для них дедупликация по тексту НЕ применяется
+    # (менеджер может повторить «поправь #2 цена 40» если первая правка не сработала)
+    correction_markers = ("поправ", "исправ", "правк", "корректировк", "уточнен", "дополни", "обнови")
+    is_correction_msg = any(cm in text_lower for cm in correction_markers)
+
+    if not any(kw in text_lower for kw in keywords) and not is_correction_msg:
         return  # Не похоже на задание — просто логируем
 
     # Дедупликация на уровне текста — если ТОЧНО тот же текст уже обработан, не парсим повторно
+    # ИСКЛЮЧЕНИЕ: правки (correction) — пропускаем текстовый дедуп
     import hashlib as _hl
     _text_hash = _hl.md5(text.strip().lower().encode()).hexdigest()
     _text_dedup_key = f"txt_{_text_hash}"
     with _dedup_lock:
         _text_is_dup = _text_dedup_key in _dedup_cache and (time.time() - _dedup_cache[_text_dedup_key]) < _DEDUP_TTL
-    if _text_is_dup:
+    if _text_is_dup and not is_correction_msg:
         print(f"[DEDUP] Текст уже обработан (повтор): {text[:60]}", flush=True)
         send_msg(BLOK_GROUP_ID, "ℹ️ Это сообщение уже было обработано ранее.")
         return
@@ -3696,6 +3878,17 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
         _dedup_cache[_text_dedup_key] = time.time()
         _save_dedup_cache(_dedup_cache)
 
+    # Правки (correction) — применяем отдельно, обходим _write_trips_to_sheets
+    corrections = [t for t in trips if t.get('type') == 'correction']
+    for corr in corrections:
+        try:
+            ok, msg = _apply_correction(corr)
+            status = '✏️' if ok else '⚠️'
+            send_msg(BLOK_GROUP_ID, f'{status} {msg}')
+        except Exception as e:
+            print(f'[CORRECTION] handler error: {e}', flush=True)
+            send_msg(BLOK_GROUP_ID, f'⚠️ Правка не применена: {e}')
+
     # Рейсы/возвраты/цены/перемещения поддонов → в Sheets
     # pallet_transfer: пишется в «Рейсы» (БЕЗ списания со склада — это пустые поддоны)
     sheet_events = [t for t in trips if t.get('type') in ('trip', 'return', 'price', 'pallet_transfer')]
@@ -3704,8 +3897,9 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
 
     # Бухгалтерские события → подтверждение в чат
     # Исключаем: trip/return (уже подтверждаются в _write_trips_to_sheets) +
-    # pallet_transfer (тоже подтверждается там же — иначе двойное уведомление)
-    non_trip_events = [t for t in trips if t.get('type') not in ('trip', 'return', 'pallet_transfer')]
+    # pallet_transfer (тоже подтверждается там же — иначе двойное уведомление) +
+    # correction (обработан выше отдельно)
+    non_trip_events = [t for t in trips if t.get('type') not in ('trip', 'return', 'pallet_transfer', 'correction')]
     if non_trip_events:
         _confirm_accounting_events(non_trip_events, sender_name)
 def process_update(update: dict):
