@@ -2252,6 +2252,19 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 - payment_method: "ИП" или "ООО" (куда оплатили, для type=payment_info)
 - comment: доп. информация, которая не вписывается в другие поля
 
+ЗАКУПОЧНЫЕ РЕЙСЫ (type="trip" + source="закуп") — дополнительные поля:
+- supplier: имя поставщика ("ИП Евсеев", "Великовечное", "Белореченск")
+- price_buy: цена закупки руб/шт (число)
+- delivery_in: стоимость доставки ОТ поставщика к нам (число)
+- price_sell: цена продажи руб/шт (если в том же рейсе продаём конечному клиенту)
+- delivery_out: стоимость доставки от нас клиенту (число)
+- sell_date: дата продажи ДД.ММ.ГГГГ (если продажа есть)
+
+Если в одном закупочном рейсе несколько разных блоков с разными ценами —
+кладёшь массив в products_detail: [{"code": "20(3-0)", "pallets": 9, "qty_per_pallet": 90,
+"price_buy": 39, "price_sell": 61}, ...] — это создаст в листе «Закупки»
+родительскую строку + дочерние по каждому блоку.
+
 ПРАВКИ (type="correction") — для дописывания/исправления уже занесённых записей:
 - target_table: "Закупки" | "Рейсы" | "Склад"
 - target_num: номер записи (если назван в сообщении: "закупка #2", "рейс №5")
@@ -2278,6 +2291,20 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 
 Триггеры на correction в тексте: "поправь", "исправь", "правка", "уточнение",
 "дополни", "добавь к закупке", "обнови", "корректировка".
+
+⚠️ ВАЖНО — отличай correction от создания новой записи:
+- correction = ИЗМЕНЕНИЕ существующей записи (есть № или дата+клиент которые УЖЕ есть в таблице).
+- pallet_transfer / trip = СОЗДАНИЕ новой записи (даже если сообщение начинается с «исправь»).
+
+Если менеджер пишет «Исправь рейсы, перемещение поддонов 200 пд с Тихорецкой на Карьер»
+— это НОВЫЙ pallet_transfer, а НЕ correction. Менеджер хочет ЗАПИСАТЬ перемещение,
+а не править существующее. Возвращай type="pallet_transfer".
+
+Если пишет «Поправь рейс #5: водитель не Кораблев, а Адлейба» — это correction
+(есть номер существующего рейса).
+
+Если пишет «Исправь Закупки от 13.05, поставщик X, цена Y» — это correction
+(дата существующей закупки + обновление полей).
 
 ПРИМЕРЫ сообщений бухгалтера:
 "Надо изменить цену у МеликсетянТ на Блок 390х190х188 /3 с дост. с 24.04.26г. на 61,00 руб"
@@ -2879,45 +2906,88 @@ def _write_purchase_to_sheets(trip: dict):
         pieces = trip.get("pieces") or ""
         if not pieces and trip.get("products_detail"):
             try:
-                pieces = sum(int(p.get("pieces", 0) or 0) for p in trip["products_detail"])
+                # products_detail формат: [{code, pallets, qty_per_pallet, price_buy?, price_sell?}]
+                pieces = sum(
+                    int((p.get("pallets") or 0)) * int((p.get("qty_per_pallet") or 0))
+                    for p in trip["products_detail"]
+                )
+                if pieces == 0:
+                    # fallback на старое поле pieces
+                    pieces = sum(int(p.get("pieces", 0) or 0) for p in trip["products_detail"])
                 if pieces == 0:
                     pieces = ""
             except Exception:
                 pieces = ""
 
-        # Цены — пока не парсятся, оставляем пустыми (потом руками)
         price_buy = trip.get("price_buy") or ""
         price_sell = trip.get("price_sell") or ""
         delivery_in = trip.get("delivery_in") or ""
         delivery_out = trip.get("delivery_out") or ""
         sell_date = trip.get("sell_date") or ""
 
+        # ─── МНОГОПРОДУКТОВАЯ ЗАКУПКА: несколько блоков с разными ценами ───
+        # Если в products_detail минимум 2 элемента с разными ценами — создаём
+        # родителя (target_row) + дочерние строки 2.1, 2.2 ...
+        pd = trip.get("products_detail") or []
+        has_multi_prices = (
+            len(pd) >= 2 and
+            len(set(p.get("price_buy") for p in pd if p.get("price_buy"))) >= 2
+        )
+
         # 5. Пишем данные РАЗДЕЛЬНО, чтобы не затереть формулы I, N, P, Q, R
-        # A:H — 8 колонок (без I=формула)
-        ah_row = [
-            new_num,                                    # A
-            trip.get("date") or _today_msk(),           # B
-            supplier,                                    # C
-            from_loc,                                    # D
-            product,                                     # E
-            pieces,                                      # F
-            pallets,                                     # G
-            price_buy,                                   # H
-        ]
-        ws.update(values=[ah_row], range_name=f'A{target_row}:H{target_row}', value_input_option='USER_ENTERED')
+        if has_multi_prices:
+            # Родитель: общие поля. F, G, I, N, H, M — формулы или пусто.
+            products_agg = "+".join(p.get("code") or "" for p in pd)
+            ws.update(values=[[new_num, trip.get("date") or _today_msk(), supplier, from_loc, products_agg,
+                               f'=SUMIF($A$4:$A$30;$A{target_row}&".*";$F$4:$F$30)',
+                               f'=SUMIF($A$4:$A$30;$A{target_row}&".*";$G$4:$G$30)',
+                               '']],
+                      range_name=f'A{target_row}:H{target_row}', value_input_option='USER_ENTERED')
+            ws.update(values=[[f'=SUMIF($A$4:$A$30;$A{target_row}&".*";$I$4:$I$30)']],
+                      range_name=f'I{target_row}', value_input_option='USER_ENTERED')
+            ws.update(values=[[delivery_in, trip.get("to_location") or "", sell_date, '']],
+                      range_name=f'J{target_row}:M{target_row}', value_input_option='USER_ENTERED')
+            ws.update(values=[[f'=SUMIF($A$4:$A$30;$A{target_row}&".*";$N$4:$N$30)']],
+                      range_name=f'N{target_row}', value_input_option='USER_ENTERED')
+            if delivery_out:
+                ws.update(values=[[delivery_out]], range_name=f'O{target_row}', value_input_option='USER_ENTERED')
 
-        # J:M — 4 колонки (между I-формулой и N-формулой)
-        jm_row = [
-            delivery_in,                                 # J
-            trip.get("to_location") or "",              # K
-            sell_date,                                   # L
-            price_sell,                                  # M
-        ]
-        ws.update(values=[jm_row], range_name=f'J{target_row}:M{target_row}', value_input_option='USER_ENTERED')
+            # Вставляем дочерние строки сразу под родителем
+            blank_rows = [[''] * 18 for _ in pd]
+            ws.insert_rows(blank_rows, row=target_row + 1, value_input_option='USER_ENTERED')
 
-        # O — отдельная колонка (между N-формулой и P-формулой)
-        if delivery_out:
-            ws.update(values=[[delivery_out]], range_name=f'O{target_row}', value_input_option='USER_ENTERED')
+            for ci, p_det in enumerate(pd):
+                cr = target_row + 1 + ci
+                d_code = p_det.get("code") or ""
+                d_pallets = p_det.get("pallets") or ""
+                d_qty = p_det.get("qty_per_pallet") or 0
+                d_pieces = int(d_pallets) * int(d_qty) if d_pallets and d_qty else (p_det.get("pieces") or "")
+                d_pbuy = p_det.get("price_buy") or ""
+                d_psell = p_det.get("price_sell") or ""
+                ws.update(values=[[f'{new_num}.{ci+1}']], range_name=f'A{cr}', value_input_option='RAW')
+                ws.update(values=[['', '', '', d_code, d_pieces, d_pallets, d_pbuy]],
+                          range_name=f'B{cr}:H{cr}', value_input_option='USER_ENTERED')
+                ws.update(values=[[f'=IF(OR(F{cr}="";H{cr}="");"";F{cr}*H{cr})']],
+                          range_name=f'I{cr}', value_input_option='USER_ENTERED')
+                ws.update(values=[['', '', '', d_psell]],
+                          range_name=f'J{cr}:M{cr}', value_input_option='USER_ENTERED')
+                ws.update(values=[[f'=IF(OR(F{cr}="";M{cr}="");"";F{cr}*M{cr})']],
+                          range_name=f'N{cr}', value_input_option='USER_ENTERED')
+                ws.update(values=[['', '', '', '']],
+                          range_name=f'O{cr}:R{cr}', value_input_option='USER_ENTERED')
+        else:
+            # Простая одноблочная закупка
+            ah_row = [
+                new_num, trip.get("date") or _today_msk(), supplier, from_loc, product,
+                pieces, pallets, price_buy,
+            ]
+            ws.update(values=[ah_row], range_name=f'A{target_row}:H{target_row}', value_input_option='USER_ENTERED')
+
+            jm_row = [delivery_in, trip.get("to_location") or "", sell_date, price_sell]
+            ws.update(values=[jm_row], range_name=f'J{target_row}:M{target_row}', value_input_option='USER_ENTERED')
+
+            if delivery_out:
+                ws.update(values=[[delivery_out]], range_name=f'O{target_row}', value_input_option='USER_ENTERED')
 
         # 6. Если делали insert_row — формулы не унаследовались, восстанавливаем
         if need_restore_formulas:
@@ -3860,7 +3930,10 @@ def _write_accounting_to_sheets(events: list):
             product = evt.get('price_product') or ''
             # Для оплат: дополняем информацию
             comment = evt.get('comment') or ''
-            if evt.get('type') == 'payment_info':
+            evt_type = evt.get('type') or ''
+            client_field = evt.get('client') or ''
+
+            if evt_type == 'payment_info':
                 pay_type = evt.get('payment_type') or ''
                 pay_method = evt.get('payment_method') or ''
                 parts = []
@@ -3870,11 +3943,39 @@ def _write_accounting_to_sheets(events: list):
                     parts.append(f'на {pay_method}')
                 if parts:
                     comment = ', '.join(parts) + (f'; {comment}' if comment else '')
+
+            # Для correction: формируем подробный комментарий из target и updates
+            if evt_type == 'correction':
+                tt = evt.get('target_table') or ''
+                tn = evt.get('target_num')
+                td = evt.get('target_date') or ''
+                tc = evt.get('target_client') or ''
+                updates = evt.get('updates') or {}
+                details = evt.get('details') or []
+                target_parts = []
+                if tt:
+                    target_parts.append(tt)
+                if tn:
+                    target_parts.append(f'#{tn}')
+                if td:
+                    target_parts.append(td)
+                if tc:
+                    target_parts.append(tc)
+                target_str = ' '.join(target_parts)
+                upd_str = ', '.join(f'{k}={v}' for k, v in updates.items())
+                det_str = f' + {len(details)} блок-детал.' if details else ''
+                comment = f'{target_str}: {upd_str}{det_str}'
+                # client_field оставляем — это target_client
+                if tc:
+                    client_field = tc
+                product = ''
+                amount = ''
+
             row = [
                 str(last_num),
                 evt.get('date') or _today_msk(),
-                evt.get('type') or '',
-                evt.get('client') or '',
+                evt_type,
+                client_field,
                 product,
                 str(amount) if amount else '',
                 evt.get('object_name') or '',
@@ -3993,6 +4094,12 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
         except Exception as e:
             print(f'[CORRECTION] handler error: {e}', flush=True)
             send_msg(BLOK_GROUP_ID, f'⚠️ Правка не применена: {e}')
+    # Логируем правки в Бухгалтерию (для аудита кто что когда правил)
+    if corrections:
+        try:
+            _write_accounting_to_sheets(corrections)
+        except Exception as e:
+            print(f'[CORRECTION] log error: {e}', flush=True)
 
     # Рейсы/возвраты/цены/перемещения поддонов → в Sheets
     # pallet_transfer: пишется в «Рейсы» (БЕЗ списания со склада — это пустые поддоны)
