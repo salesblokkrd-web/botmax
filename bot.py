@@ -459,11 +459,14 @@ for _vn, _vv in _OPTIONAL_VARS.items():
 BASE_URL = "https://botapi.max.ru"
 def _api(method: str, endpoint: str, params: dict = None, body: dict = None) -> dict:
     p = dict(params or {})
-    p["access_token"] = TOKEN  # MAX API требует токен в query string
-    url = f"{BASE_URL}/{endpoint}?{urllib.parse.urlencode(p)}"
+    # MAX API: query-параметр access_token deprecated с мая 2026, теперь header Authorization (без Bearer)
+    url = f"{BASE_URL}/{endpoint}"
+    if p:
+        url += "?" + urllib.parse.urlencode(p)
     data = json.dumps(body).encode("utf-8") if body is not None else None
     for _retry in range(2):
         req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", TOKEN)
         if data:
             req.add_header("Content-Type", "application/json")
         req.add_header("User-Agent", "quarry-max-bot/1.0")
