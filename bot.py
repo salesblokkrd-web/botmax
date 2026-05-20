@@ -2722,12 +2722,15 @@ def _apply_correction(event: dict):
                     break
 
         if target_row is None and target_date:
+            # Нормализуем target_date (поддержка «18.05.26 г.» → «18.05.2026»)
+            target_date_norm = _normalize_date(target_date)
             col_date = ws.col_values(config["date_col"])
             col_client = ws.col_values(config["client_col"]) if target_client else []
             for i, v in enumerate(col_date, start=1):
                 if i < config["data_start_row"]:
                     continue
-                if target_date in v.strip():
+                row_date_norm = _normalize_date(v.strip())
+                if target_date_norm and row_date_norm == target_date_norm:
                     if target_client:
                         client_in_row = col_client[i-1] if i-1 < len(col_client) else ""
                         if target_client.lower() in client_in_row.lower():
@@ -3030,13 +3033,45 @@ def _write_purchase_to_sheets(trip: dict):
         _alert_admin("Ошибка записи в лист Закупки", e)
         return False, str(e)
 
+def _normalize_date(date_str: str) -> str:
+    """Нормализует дату в формат ДД.ММ.ГГГГ.
+    Поддерживает: «18.05.26», «18.05.2026», «18/05/2026», «18.05.26 г.», «2026-05-18».
+    """
+    import re as _re
+    if not date_str:
+        return ""
+    s = str(date_str).strip()
+    # Убираем хвост «г.» и пробелы
+    s = _re.sub(r'\s*г\.?\s*$', '', s).strip()
+    # Заменяем разделители на точки
+    s = s.replace('/', '.').replace('-', '.')
+
+    # YYYY.MM.DD → DD.MM.YYYY
+    m = _re.match(r'^(\d{4})\.(\d{1,2})\.(\d{1,2})$', s)
+    if m:
+        y, mo, d = m.groups()
+        return f"{int(d):02d}.{int(mo):02d}.{y}"
+
+    # DD.MM.YYYY или DD.MM.YY
+    m = _re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$', s)
+    if m:
+        d, mo, y = m.groups()
+        if len(y) == 2:
+            y = "20" + y  # 26 → 2026
+        return f"{int(d):02d}.{int(mo):02d}.{y}"
+    return s
+
+
 def _trip_date_to_sortkey(date_str: str):
-    """Конвертирует строку даты ДД.ММ.ГГГГ в сортируемый кортеж (Y,M,D).
-    Если не парсится — возвращает None (тогда строка идёт в конец)."""
+    """Конвертирует строку даты в сортируемый кортеж (Y,M,D).
+    Поддерживает «ДД.ММ.ГГГГ», «ДД.ММ.ГГ», «ДД.ММ.ГГ г.» (нормализуем).
+    Если не парсится — возвращает None.
+    """
     if not date_str:
         return None
     try:
-        parts = date_str.strip().split('.')
+        normalized = _normalize_date(date_str)
+        parts = normalized.strip().split('.')
         if len(parts) == 3:
             d, m, y = parts
             return (int(y), int(m), int(d))
@@ -4254,12 +4289,20 @@ def process_update(update: dict):
                     handle_blok_group_message(user_name, text, msg)
                 except Exception as e:
                     import traceback
-                    err = f"[BLOK_ERROR] {e}\n{traceback.format_exc()[:400]}"
+                    full_trace = traceback.format_exc()
+                    err = f"[BLOK_ERROR] {e}\n{full_trace[:1200]}"
                     print(err, flush=True)
+                    # В Telegram админу — полный трейс (до 3500 символов)
                     if OWNER_CHAT_ID:
                         try:
-                            send_msg(OWNER_CHAT_ID, f"⚠️ Ошибка блок-обработки:\n{err[:500]}")
-                        except:
+                            admin_msg = (
+                                f"⚠️ Ошибка блок-обработки\n"
+                                f"Тип: {type(e).__name__}\n"
+                                f"Сообщение пользователя: {text[:150]}\n\n"
+                                f"Trace:\n{full_trace[:2500]}"
+                            )
+                            send_msg(OWNER_CHAT_ID, admin_msg[:3800])
+                        except Exception:
                             pass
             return  # не пускаем в основную логику бота
 
