@@ -2371,7 +2371,7 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 ПРАВКА НЕСКОЛЬКИХ ДНЕЙ В ОДНОМ СООБЩЕНИИ (ОБЯЗАТЕЛЬНО извлекай все):
 Если менеджер пишет «Исправить Закупки от 12.05 ... \\n Исправить Закупки от 13.05 ... \\n Исправить Закупки от 14.05 ...» — это ТРИ отдельных события correction, каждое со своими updates/details. Возвращай массив из 3 объектов, не один!
 
-Верни ТОЛЬКО JSON-массив, без пояснений. Если поле неизвестно — null.
+ВАЖНО: ответ — это ТОЛЬКО JSON-массив. Не пиши никаких пояснений, заголовков, разборов, markdown-блоков (никаких ```), никаких «Анализирую», «Разбираю», «Понял», «Рейс 1 →». Начинай с `[` и заканчивай `]`. Если поле неизвестно — null. Если событий нет — верни `[]`.
 
 Текст:
 {text}"""
@@ -2379,7 +2379,11 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
     body = json.dumps({
         "model": "claude-sonnet-4-6",
         "max_tokens": 4096,  # увеличено для длинных правок с details и множественных событий
-        "messages": [{"role": "user", "content": prompt}]
+        "system": "Ты JSON-only парсер. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON-массивом. Без markdown, без объяснений, без префиксов, без code-блоков. Если событий нет — верни []. Никакого текста до '[' или после ']'.",
+        "messages": [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": "["}
+        ]
     }).encode()
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
@@ -2395,18 +2399,30 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
         with urllib.request.urlopen(req, timeout=30) as r:
             resp = json.loads(r.read())
         raw_text = resp["content"][0]["text"].strip()
+        # Восстанавливаем открывающую '[' (pre-fill ассистента съел её)
+        if not raw_text.startswith("["):
+            raw_text = "[" + raw_text
         # Убираем markdown-блок если есть
         raw_text = re.sub(r'^```[a-z]*\n?', '', raw_text)
         raw_text = re.sub(r'\n?```$', '', raw_text)
         try:
             events = json.loads(raw_text)
         except json.JSONDecodeError:
-            if _attempt == 0:
-                print(f"[BLOK_PARSE] Невалидный JSON от Claude (попытка 1), повтор...", flush=True)
-                continue
-            else:
-                print(f"[BLOK_PARSE] Невалидный JSON от Claude (попытка 2): {raw_text[:200]}", flush=True)
-                return []
+            # Fallback: попробовать вытащить JSON-массив regex'ом (если Claude всё-таки добавил прозу вокруг)
+            m = re.search(r'\[\s*\{[\s\S]*\}\s*\]', raw_text)
+            events = None
+            if m:
+                try:
+                    events = json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    events = None
+            if events is None:
+                if _attempt == 0:
+                    print(f"[BLOK_PARSE] Невалидный JSON от Claude (попытка 1), повтор...", flush=True)
+                    continue
+                else:
+                    print(f"[BLOK_PARSE] Невалидный JSON от Claude (попытка 2): {raw_text[:300]}", flush=True)
+                    return []
         # Нормализация полей (Claude иногда возвращает альтернативные имена)
         for evt in events:
             if 'new_price' in evt and 'price_new' not in evt:
@@ -4207,7 +4223,12 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     trips = _parse_blok_plan_claude(text, msg_date=_msg_date)
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
-        send_msg(BLOK_GROUP_ID, "⚠️ Не удалось разобрать сообщение. Попробуйте переформулировать или отправить каждую операцию отдельным сообщением.")
+        # Эвристика: если в тексте несколько маркеров «Закупка <дата>» — это слитное сообщение
+        purchase_markers = len(re.findall(r'(?i)\bзакупка\s+\d', text))
+        if purchase_markers >= 2:
+            send_msg(BLOK_GROUP_ID, "⚠️ Похоже здесь несколько закупок в одном сообщении. Напишите каждую закупку отдельным сообщением, пожалуйста.")
+        else:
+            send_msg(BLOK_GROUP_ID, "⚠️ Не удалось разобрать сообщение. Попробуйте переформулировать или отправить каждую операцию отдельным сообщением.")
         return
 
     # Дедупликация — отсекаем повторные сообщения (Светлана повторяет 3-6 раз)
