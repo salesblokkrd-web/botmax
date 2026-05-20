@@ -8,6 +8,7 @@ import datetime
 import threading
 import urllib.request
 import urllib.parse
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -2380,10 +2381,7 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
         "model": "claude-sonnet-4-6",
         "max_tokens": 4096,  # увеличено для длинных правок с details и множественных событий
         "system": "Ты JSON-only парсер. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON-массивом. Без markdown, без объяснений, без префиксов, без code-блоков. Если событий нет — верни []. Никакого текста до '[' или после ']'.",
-        "messages": [
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": "["}
-        ]
+        "messages": [{"role": "user", "content": prompt}]
     }).encode()
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
@@ -2399,9 +2397,6 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
         with urllib.request.urlopen(req, timeout=30) as r:
             resp = json.loads(r.read())
         raw_text = resp["content"][0]["text"].strip()
-        # Восстанавливаем открывающую '[' (pre-fill ассистента съел её)
-        if not raw_text.startswith("["):
-            raw_text = "[" + raw_text
         # Убираем markdown-блок если есть
         raw_text = re.sub(r'^```[a-z]*\n?', '', raw_text)
         raw_text = re.sub(r'\n?```$', '', raw_text)
@@ -2464,6 +2459,17 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
                     if m:
                         evt[dk] = f"{int(m.group(3)):02d}.{int(m.group(2)):02d}.{m.group(1)}"
         return events
+      except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode('utf-8', errors='replace')[:500]
+        except Exception:
+            err_body = ""
+        if _attempt == 0:
+            print(f"[BLOK_PARSE] HTTPError (попытка 1): {e} | body={err_body}, повтор...", flush=True)
+            time.sleep(1)
+            continue
+        print(f"[BLOK_PARSE] HTTPError (попытка 2): {e} | body={err_body}", flush=True)
+        return []
       except Exception as e:
         if _attempt == 0:
             print(f"[BLOK_PARSE] Ошибка (попытка 1): {e}, повтор...", flush=True)
