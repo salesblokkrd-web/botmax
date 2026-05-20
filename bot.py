@@ -2988,16 +2988,20 @@ def _write_purchase_to_sheets(trip: dict):
                 itogo_row = i
                 break
 
-        # 2. Находим последний номер и первую пустую строку
+        # 2. Находим последний номер и первую ПОЛНОСТЬЮ ПУСТУЮ строку.
+        # ВАЖНО: дочки иерархии имеют ТЕКСТОВЫЙ ID ("2.2", "5.1") — они НЕ цифры,
+        # но строка занята. Раньше алгоритм считал такие строки пустыми и
+        # затирал дочки записывая родителя сверху.
         last_num = 0
         target_row = None
         max_search = itogo_row - 1 if itogo_row else 50
         for i in range(4, max_search + 1):
-            cell_val = col_a[i - 1] if i - 1 < len(col_a) else ''
-            if cell_val.strip().isdigit():
-                last_num = max(last_num, int(cell_val.strip()))
-            elif target_row is None:
+            cell_val = (col_a[i - 1] if i - 1 < len(col_a) else '').strip()
+            if cell_val.isdigit():
+                last_num = max(last_num, int(cell_val))
+            elif cell_val == '' and target_row is None:
                 target_row = i
+            # cell_val это нечисловой текст ("2.2", "5.1") — пропускаем, строка занята
         new_num = last_num + 1
 
         # 3. Если все строки до ИТОГО заполнены — вставляем перед ИТОГО
