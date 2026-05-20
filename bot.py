@@ -2284,6 +2284,22 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 "price_buy": 39, "price_sell": 61}}, ...] — это создаст в листе «Закупки»
 родительскую строку + дочерние по каждому блоку.
 
+СБОРНЫЙ РЕЙС (одна машина — несколько клиентов / несколько выгрузок):
+Если в одном рейсе РАЗНЫЕ КЛИЕНТЫ (несколько точек выгрузки) — клади массив
+deliveries[], каждый элемент = ОДНА выгрузка = ОДНА закупка в учёте:
+[{{"client": "ИП Шубина", "delivery_in": 10200,
+   "products": [{{"code": "12(2-0)", "pallets": 8, "qty_per_pallet": 120, "price_buy": 32, "price_sell": 48}},
+                {{"code": "12(2-0)", "pallets": 1, "qty_per_pallet": 120, "price_buy": 30, "price_sell": 48}}]}},
+ {{"client": "ИП Горячкина", "delivery_in": 6800,
+   "products": [{{"code": "20(3-0)", "pallets": 2, "qty_per_pallet": 75, "price_buy": 39, "price_sell": 61}},
+                {{"code": "12(2-0)", "pallets": 4, "qty_per_pallet": 120, "price_buy": 30, "price_sell": 48}}]}}]
+Когда есть deliveries[] — НЕ дублируй данные в верхнем уровне: client, products_detail,
+delivery_in, price_sell, price_buy — НЕ заполняй (они теперь внутри deliveries).
+На верхнем уровне оставь только ОБЩИЕ поля: type, source, date, truck, driver,
+from_location, to_location, supplier, и опционально pallets (общее число поддонов).
+Бот сам разнесёт: 1 рейс в лист «Рейсы» (агрегат по продукции, клиенты через запятую) +
+N закупок в лист «Закупки» (по одной на каждый delivery со своими ценами и доставкой).
+
 ПРАВКИ (type="correction") — для дописывания/исправления уже занесённых записей:
 - target_table: "Закупки" | "Рейсы" | "Склад"
 - target_num: номер записи (если назван в сообщении: "закупка #2", "рейс №5")
@@ -2368,6 +2384,16 @@ def _parse_blok_plan_claude(text: str, msg_date: str = "") -> list:
 
 (В этом примере: 9 подд × 90 шт/подд = 810 шт; 4 подд × 120 шт/подд = 480 шт.
 Сам считай шт = подд × шт_на_поддон, если менеджер дал шт_на_поддон.)
+
+СБОРНЫЙ РЕЙС — ОДИН рейс, ДВЕ выгрузки разным клиентам (ВЕРНИ ОДНО событие type=trip с deliveries[]!):
+"Выполненный рейс от 19.05 для 135-го. Закупка 19.05 от ИП Евсеев, Великовечное, 12(2-0) - 8 подд по 120 шт/подд цена 32 руб + 12(2-0) - 1 подд по 120 шт/подд цена 30 руб доставка 10200 руб на ИП Шубина цена продажи 48 руб. Закупка 19.05 от ИП Евсеев, Великовечное, 20(3-0) - 2 подд по 75 шт/подд цена 39 руб + 12(2-0) - 4 подд по 120 шт/подд цена 30 руб, цена доставки 6800 руб на ИП Горячкина цена продажи 20(3-0) - 61 руб, 12(2-0) - 48 руб."
+→ [{{"type":"trip","source":"закуп","date":"19.05.2026","truck":"у135рх 193","driver":"Кораблев М.Н.","from_location":"Великовечное","to_location":"КРД","supplier":"ИП Евсеев","deliveries":[{{"client":"ИП Шубина","delivery_in":10200,"products":[{{"code":"12(2-0)","pallets":8,"qty_per_pallet":120,"price_buy":32,"price_sell":48}},{{"code":"12(2-0)","pallets":1,"qty_per_pallet":120,"price_buy":30,"price_sell":48}}]}},{{"client":"ИП Горячкина","delivery_in":6800,"products":[{{"code":"20(3-0)","pallets":2,"qty_per_pallet":75,"price_buy":39,"price_sell":61}},{{"code":"12(2-0)","pallets":4,"qty_per_pallet":120,"price_buy":30,"price_sell":48}}]}}]}}]
+
+ВАЖНО — определение СБОРНОГО рейса:
+• Один рейс = одна машина = одна дата = один поставщик, но РАЗНЫЕ КЛИЕНТЫ / РАЗНЫЕ ТОЧКИ ВЫГРУЗКИ
+• Признак: в сообщении две закупки/выгрузки идут подряд (через ". Закупка ...", "+ на клиента ...", "на ИП X ... на ИП Y ...")
+• Возвращай ОДНО событие type=trip с массивом deliveries[], НЕ ДВА отдельных события!
+• На верхнем уровне НЕ дублируй client, products_detail, delivery_in, price_buy, price_sell — они в deliveries[]
 
 ПРАВКА НЕСКОЛЬКИХ ДНЕЙ В ОДНОМ СООБЩЕНИИ (ОБЯЗАТЕЛЬНО извлекай все):
 Если менеджер пишет «Исправить Закупки от 12.05 ... \\n Исправить Закупки от 13.05 ... \\n Исправить Закупки от 14.05 ...» — это ТРИ отдельных события correction, каждое со своими updates/details. Возвращай массив из 3 объектов, не один!
@@ -3255,7 +3281,21 @@ def _write_trips_to_sheets(trips: list):
             else:
                 # Рейс — формат продукции: "20(3-0)" или "20(3-0)+9(2-0)"
                 # Парсер возвращает product в правильном формате, pallets уже внутри
-                product = trip.get("product") or ""
+                # СБОРНЫЙ рейс (deliveries[]) — агрегируем клиентов и продукты для строки Рейсов
+                deliveries = trip.get("deliveries") or []
+                if deliveries:
+                    clients_agg = ", ".join(d.get("client") or "" for d in deliveries if d.get("client"))
+                    products_seen = []
+                    for d in deliveries:
+                        for p in (d.get("products") or []):
+                            code = p.get("code")
+                            if code and code not in products_seen:
+                                products_seen.append(code)
+                    product = "+".join(products_seen) if products_seen else (trip.get("product") or "")
+                    trip['client'] = clients_agg  # обновляем в trip для последующих confirm-сообщений
+                    trip['product'] = product
+                else:
+                    product = trip.get("product") or ""
                 trip_date = trip.get("date") or _today_msk()
                 row = [
                     '',  # № проставится при перенумерации
@@ -3298,12 +3338,37 @@ def _write_trips_to_sheets(trips: list):
 
             # Закупка → пишем в лист «Закупки» (отдельно от Рейсов)
             if is_purchase:
-                try:
-                    pur_ok, pur_msg = _write_purchase_to_sheets(trip)
-                    if pur_ok:
-                        send_msg(BLOK_GROUP_ID, pur_msg)
-                except Exception as e:
-                    print(f"[PURCHASE] Ошибка: {e}", flush=True)
+                deliveries = trip.get("deliveries") or []
+                if deliveries:
+                    # Сборный рейс — N закупок, по одной на каждую выгрузку
+                    for d in deliveries:
+                        pur_trip = {
+                            "type": "trip",
+                            "source": "закуп",
+                            "date": trip.get("date"),
+                            "truck": trip.get("truck"),
+                            "driver": trip.get("driver"),
+                            "from_location": trip.get("from_location"),
+                            "to_location": trip.get("to_location"),
+                            "supplier": trip.get("supplier"),
+                            "client": d.get("client"),
+                            "delivery_in": d.get("delivery_in"),
+                            "products_detail": d.get("products") or [],
+                            "sell_date": d.get("sell_date") or trip.get("sell_date") or trip.get("date"),
+                        }
+                        try:
+                            pur_ok, pur_msg = _write_purchase_to_sheets(pur_trip)
+                            if pur_ok:
+                                send_msg(BLOK_GROUP_ID, pur_msg)
+                        except Exception as e:
+                            print(f"[PURCHASE] Ошибка delivery {d.get('client','?')}: {e}", flush=True)
+                else:
+                    try:
+                        pur_ok, pur_msg = _write_purchase_to_sheets(trip)
+                        if pur_ok:
+                            send_msg(BLOK_GROUP_ID, pur_msg)
+                    except Exception as e:
+                        print(f"[PURCHASE] Ошибка: {e}", flush=True)
 
             if product and trip.get("from_location") and not is_purchase:
                 trip_pallets = trip.get("pallets")
