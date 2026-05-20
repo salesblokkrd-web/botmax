@@ -2130,6 +2130,49 @@ def _normalize_location_for_dedup(loc: str) -> str:
     # Иначе — это имя поставщика, оставляем как есть
     return s
 
+def _merge_combined_trip_events(events: list) -> list:
+    """Страховка от Claude: если он вернул 2+ отдельных trip-события с одинаковыми
+    (date, truck, driver, from_location, source) но разными клиентами — мерджим
+    в один сборный рейс с deliveries[]. Работает только для type=trip без существующего
+    deliveries[]. Все остальные события (correction, return, price, ...) проходят как есть."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    others = []
+    for e in events:
+        if e.get('type') != 'trip' or e.get('deliveries'):
+            others.append(e)
+            continue
+        key = (
+            e.get('date') or '',
+            e.get('truck') or '',
+            e.get('driver') or '',
+            (e.get('from_location') or '').lower(),
+            (e.get('source') or '').lower(),
+            (e.get('supplier') or '').lower(),
+        )
+        groups[key].append(e)
+    result = list(others)
+    for key, evts in groups.items():
+        if len(evts) <= 1:
+            result.extend(evts)
+            continue
+        # 2+ trip с одинаковым ключом — мерджим
+        base = dict(evts[0])
+        deliveries = []
+        for e in evts:
+            deliveries.append({
+                'client': e.get('client'),
+                'delivery_in': e.get('delivery_in'),
+                'products': e.get('products_detail') or [],
+            })
+        base['deliveries'] = deliveries
+        for k in ('client', 'products_detail', 'delivery_in', 'price_buy', 'price_sell', 'product', 'pallets'):
+            base.pop(k, None)
+        result.append(base)
+        print(f"[MERGE] Сборный рейс: {len(evts)} событий слиты в одно, клиенты={[d.get('client') for d in deliveries]}", flush=True)
+    return result
+
+
 def _dedup_check(event: dict) -> bool:
     """Проверяет, не было ли это событие уже обработано за последние 24ч.
     Возвращает True если ДУБЛИКАТ (уже было), False если новое."""
@@ -3006,7 +3049,13 @@ def _write_purchase_to_sheets(trip: dict):
         # 5. Пишем данные РАЗДЕЛЬНО, чтобы не затереть формулы I, N, P, Q, R
         if has_multi_prices:
             # Родитель: общие поля. F, G, I, N, H, M — формулы или пусто.
-            products_agg = "+".join(p.get("code") or "" for p in pd)
+            # Дедуплицируем коды (две позиции 12(2-0) → один "12(2-0)", не "12(2-0)+12(2-0)")
+            _codes_seen = []
+            for p in pd:
+                c = p.get("code")
+                if c and c not in _codes_seen:
+                    _codes_seen.append(c)
+            products_agg = "+".join(_codes_seen)
             ws.update(values=[[new_num, trip.get("date") or _today_msk(), supplier, from_loc, products_agg,
                                f'=SUMIF($A$4:$A$30;$A{target_row}&".*";$F$4:$F$30)',
                                f'=SUMIF($A$4:$A$30;$A{target_row}&".*";$G$4:$G$30)',
@@ -4295,6 +4344,8 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     else:
         _msg_date = _today_msk()
     trips = _parse_blok_plan_claude(text, msg_date=_msg_date)
+    # Страховка: если Claude вернул 2+ trip с одинаковым ТС/датой/откуда — мерджим в сборный
+    trips = _merge_combined_trip_events(trips)
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
         # Эвристика: если в тексте несколько маркеров «Закупка <дата>» — это слитное сообщение
@@ -4619,15 +4670,46 @@ def _format_price_list():
 
 def _run_self_test():
     """Selftest при старте: парсим тестовое сообщение через Claude, отправляем результат owner."""
+    # ── Тест 1: простое изменение цены ──
     test_text = "Надо изменить цену у ТЕСТ-КЛИЕНТ на Блок 390х190х188 с 01.01.2026 на 99,99 руб"
-    print(f"[SELFTEST] Тестируем парсинг: {test_text}", flush=True)
-    
+    print(f"[SELFTEST] Тест 1 (цена): {test_text}", flush=True)
+
     events = _parse_blok_plan_claude(test_text)
     if not events:
-        report = "❌ SELFTEST FAIL: Claude вернул пустой список"
+        report = "❌ SELFTEST Тест 1 FAIL: Claude вернул пустой список"
         print(f"[SELFTEST] {report}", flush=True)
         # НЕ отправляем владельцу — только в лог
         return
+
+    # ── Тест 2: сборный рейс с двумя выгрузками + одна продукция по 2 ценам ──
+    test_text_2 = ("Выполненный рейс от 19.05 для 135-го. "
+                   "Закупка 19.05 от ИП Евсеев, Великовечное, 12(2-0) - 8 подд по 120 шт/подд цена 32 руб + "
+                   "12(2-0) - 1 подд по 120 шт/подд цена 30 руб, доставка 10200 руб на ИП Шубина цена продажи 48 руб. "
+                   "Закупка 19.05 от ИП Евсеев, Великовечное, 20(3-0) - 2 подд по 75 шт/подд цена 39 руб + "
+                   "12(2-0) - 4 подд по 120 шт/подд цена 30 руб, доставка 6800 руб на ИП Горячкина "
+                   "цена продажи 20(3-0) - 61 руб, 12(2-0) - 48 руб")
+    print(f"[SELFTEST] Тест 2 (сборный рейс): {test_text_2[:80]}...", flush=True)
+    events_2 = _parse_blok_plan_claude(test_text_2, msg_date="19.05.2026")
+    events_2 = _merge_combined_trip_events(events_2)
+    if not events_2:
+        print("[SELFTEST] ❌ Тест 2 FAIL: пустой список", flush=True)
+    elif len(events_2) != 1:
+        print(f"[SELFTEST] ❌ Тест 2 FAIL: ожидалось 1 событие, получено {len(events_2)}: {events_2}", flush=True)
+    else:
+        evt = events_2[0]
+        if evt.get('type') != 'trip':
+            print(f"[SELFTEST] ❌ Тест 2 FAIL: type={evt.get('type')}, ожидалось trip", flush=True)
+        else:
+            deliv = evt.get('deliveries') or []
+            if len(deliv) != 2:
+                print(f"[SELFTEST] ❌ Тест 2 FAIL: deliveries={len(deliv)}, ожидалось 2 | event={evt}", flush=True)
+            else:
+                clients = [d.get('client') for d in deliv]
+                products_per_d = [len(d.get('products') or []) for d in deliv]
+                if any(p < 2 for p in products_per_d):
+                    print(f"[SELFTEST] ⚠️ Тест 2 ЧАСТИЧНО: deliveries есть но products={products_per_d}, клиенты={clients}", flush=True)
+                else:
+                    print(f"[SELFTEST] ✅ Тест 2 OK: 1 trip + 2 deliveries, клиенты={clients}, products/delivery={products_per_d}", flush=True)
     
     # Построим подтверждение как в реальной обработке
     lines = []
