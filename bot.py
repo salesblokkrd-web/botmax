@@ -2988,7 +2988,7 @@ def _write_purchase_to_sheets(trip: dict):
                       range_name=f'A{target_row}:H{target_row}', value_input_option='USER_ENTERED')
             ws.update(values=[[f'=SUMIF($A$4:$A$30;$A{target_row}&".*";$I$4:$I$30)']],
                       range_name=f'I{target_row}', value_input_option='USER_ENTERED')
-            ws.update(values=[[delivery_in, trip.get("to_location") or "", sell_date, '']],
+            ws.update(values=[[delivery_in, trip.get("client") or trip.get("to_location") or "", sell_date, '']],
                       range_name=f'J{target_row}:M{target_row}', value_input_option='USER_ENTERED')
             ws.update(values=[[f'=SUMIF($A$4:$A$30;$A{target_row}&".*";$N$4:$N$30)']],
                       range_name=f'N{target_row}', value_input_option='USER_ENTERED')
@@ -3026,7 +3026,7 @@ def _write_purchase_to_sheets(trip: dict):
             ]
             ws.update(values=[ah_row], range_name=f'A{target_row}:H{target_row}', value_input_option='USER_ENTERED')
 
-            jm_row = [delivery_in, trip.get("to_location") or "", sell_date, price_sell]
+            jm_row = [delivery_in, trip.get("client") or trip.get("to_location") or "", sell_date, price_sell]
             ws.update(values=[jm_row], range_name=f'J{target_row}:M{target_row}', value_input_option='USER_ENTERED')
 
             if delivery_out:
@@ -3046,8 +3046,11 @@ def _write_purchase_to_sheets(trip: dict):
             ws.update(values=[[f'=IF(OR(N{r}="";N{r}=0;Q{r}="");"";ROUND(Q{r}/N{r}*100;1))']],
                       range_name=f'R{r}', value_input_option='USER_ENTERED')
 
-        msg = f"📥 Закупка #{new_num}: {product} {pallets}пд от {supplier} → {trip.get('to_location') or 'склад'} [строка {target_row}]"
-        print(f"[PURCHASE] row#{new_num} → A{target_row}, data={ah_row}", flush=True)
+        msg = f"📥 Закупка #{new_num}: {product} {pallets}пд от {supplier} → {trip.get('client') or trip.get('to_location') or 'склад'} [строка {target_row}]"
+        if has_multi_prices:
+            print(f"[PURCHASE] row#{new_num} (multi) → A{target_row}, products={[(p.get('code'), p.get('pallets'), p.get('price_buy')) for p in pd]}", flush=True)
+        else:
+            print(f"[PURCHASE] row#{new_num} → A{target_row}, data={ah_row}", flush=True)
         return True, msg
     except Exception as e:
         import traceback
