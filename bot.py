@@ -121,6 +121,16 @@ def _save_dedup_cache(cache: dict):
 _dedup_cache = _load_dedup_cache()
 _dedup_lock = threading.Lock()
 
+# ── Очистка dedup-кеша по env-флагу (для синхронизации после ручной правки Sheets)
+if os.environ.get("CLEAR_DEDUP_ON_START") == "1":
+    try:
+        _dedup_cache.clear()
+        if os.path.exists(_DEDUP_FILE):
+            os.remove(_DEDUP_FILE)
+        print(f"[STARTUP] CLEAR_DEDUP_ON_START=1: dedup_cache очищен", flush=True)
+    except Exception as e:
+        print(f"[STARTUP] Ошибка очистки dedup_cache: {e}", flush=True)
+
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 _PALLET_PRICE = int(os.environ.get("PALLET_PRICE", "550"))
 
