@@ -2140,6 +2140,76 @@ def _normalize_location_for_dedup(loc: str) -> str:
     # Иначе — это имя поставщика, оставляем как есть
     return s
 
+
+# Маппинг машин → водители (для fallback парсера перемещений)
+_TRUCK_TO_DRIVER = {
+    "135": ("у135рх 193", "Кораблев М.Н."),
+    "319": ("р319ок 123", "Адлейба А.Ю."),
+    "638": ("р638хн 123", "Кислицин А.С."),
+}
+
+
+def _parse_pallet_transfer_fallback(text: str, msg_date: str = "") -> list:
+    """Regex-фолбэк для сообщений 'Перемещение N поддонов с X на Y для NNN от ДД.ММ'.
+    Используется когда AI-парсер вернул [] на тексте, явно про перемещение.
+    Возвращает [] если паттерн не совпал."""
+    t = text.strip().lower()
+    if "перемещ" not in t or "поддон" not in t:
+        return []
+    m_pall = re.search(r'(\d{1,4})\s*(?:поддон|подд|пд)', t)
+    if not m_pall:
+        m_pall = re.search(r'поддон[а-я]*\s+(\d{1,4})', t)
+    if not m_pall:
+        return []
+    pallets = int(m_pall.group(1))
+    m_from_to = re.search(r'с\s+([а-яё]+(?:\s+[а-яё]+)?)\s+на\s+([а-яё]+(?:\s+[а-яё]+)?)', t)
+    from_loc = None
+    to_loc = None
+    if m_from_to:
+        location_map = {
+            'тихорецкой': 'Тихорецкая', 'тихорецкая': 'Тихорецкая', 'тихорецк': 'Тихорецкая',
+            'карьер': 'Карьер', 'карьера': 'Карьер', 'карьеру': 'Карьер',
+            'крд': 'КРД', 'краснодар': 'КРД',
+        }
+        f_raw = m_from_to.group(1).strip().split()[0]
+        t_raw = m_from_to.group(2).strip().split()[0]
+        from_loc = location_map.get(f_raw, f_raw.capitalize())
+        to_loc = location_map.get(t_raw, t_raw.capitalize())
+    truck = None
+    driver = None
+    m_truck = re.search(r'для\s+(\d{3})\b', t)
+    if not m_truck:
+        m_truck = re.search(r'(?:машин[а-я]*\s+)?\b(\d{3})\b(?!\s*(?:поддон|подд|пд|шт))', t)
+    if m_truck:
+        truck_num = m_truck.group(1)
+        if truck_num in _TRUCK_TO_DRIVER:
+            truck, driver = _TRUCK_TO_DRIVER[truck_num]
+    date = msg_date or datetime.datetime.now().strftime("%d.%m.%Y")
+    m_date = re.search(r'от\s+(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?', t)
+    if m_date:
+        dd = m_date.group(1).zfill(2)
+        mm = m_date.group(2).zfill(2)
+        yy_raw = m_date.group(3)
+        if yy_raw:
+            yyyy = yy_raw if len(yy_raw) == 4 else f"20{yy_raw}"
+        else:
+            yyyy = datetime.datetime.now().strftime("%Y")
+        date = f"{dd}.{mm}.{yyyy}"
+    event = {
+        "type": "pallet_transfer",
+        "date": date,
+        "from_location": from_loc,
+        "to_location": to_loc,
+        "pallets": pallets,
+    }
+    if truck:
+        event["truck"] = truck
+    if driver:
+        event["driver"] = driver
+    print(f"[FALLBACK_PARSE] pallet_transfer regex: {event}", flush=True)
+    return [event]
+
+
 def _merge_combined_trip_events(events: list) -> list:
     """Страховка от Claude: если он вернул 2+ отдельных trip-события с одинаковыми
     (date, truck, driver, from_location, source) но разными клиентами — мерджим
@@ -4360,6 +4430,12 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     trips = _parse_blok_plan_claude(text, msg_date=_msg_date)
     # Страховка: если Claude вернул 2+ trip с одинаковым ТС/датой/откуда — мерджим в сборный
     trips = _merge_combined_trip_events(trips)
+    # Regex-фолбэк: если AI вернул [] на сообщении про перемещение поддонов — пробуем regex
+    if not trips:
+        fallback_trips = _parse_pallet_transfer_fallback(text, msg_date=_msg_date)
+        if fallback_trips:
+            print(f"[BLOK_GROUP] AI вернул [], regex-fallback нашёл pallet_transfer: {fallback_trips}", flush=True)
+            trips = fallback_trips
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
         # Эвристика: если в тексте несколько маркеров «Закупка <дата>» — это слитное сообщение
