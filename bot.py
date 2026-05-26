@@ -2156,50 +2156,65 @@ _TRUCK_TO_DRIVER = _build_truck_shortcuts()
 
 
 def _parse_pallet_transfer_fallback(text: str, msg_date: str = "") -> list:
-    """Regex-фолбэк для сообщений 'Перемещение N поддонов с X на Y для NNN от ДД.ММ'.
-    Используется когда AI-парсер вернул [] на тексте, явно про перемещение.
-    Возвращает [] если паттерн не совпал."""
-    t = text.strip().lower()
-    if "перемещ" not in t or "поддон" not in t:
+    """Гибкий regex-фолбэк для перемещений поддонов между нашими складами.
+    Триггер: 'поддон/подд/пд' + (упоминание 'перемещ/перемест' ИЛИ паттерн 'с X на Y' с двумя нашими локациями)."""
+    t = text.strip()
+    t_lo = t.lower()
+    if not re.search(r'(?:поддон|подд|пд)', t_lo):
         return []
-    m_pall = re.search(r'(\d{1,4})\s*(?:поддон|подд|пд)', t)
+    has_move_word = bool(re.search(r'\b(перемещ|перемест)', t_lo))
+    LOC_PAT = r'(?:тихорецк[а-яё]*|карьер[а-яё]*|крд|краснодар[а-яё]*|архип[а-яё]*)'
+    m_from_to = re.search(rf'с\s+({LOC_PAT})\s+(?:на|в)\s+({LOC_PAT})', t_lo)
+    if not has_move_word and not m_from_to:
+        return []
+    m_pall = re.search(r'(\d{1,4})\s*(?:поддон[а-я]*|подд|пд)\b', t_lo)
     if not m_pall:
-        m_pall = re.search(r'поддон[а-я]*\s+(\d{1,4})', t)
+        m_pall = re.search(r'поддон[а-я]*\s+(\d{1,4})', t_lo)
     if not m_pall:
         return []
     pallets = int(m_pall.group(1))
-    m_from_to = re.search(r'с\s+([а-яё]+(?:\s+[а-яё]+)?)\s+на\s+([а-яё]+(?:\s+[а-яё]+)?)', t)
+    LOC_MAP = {
+        'тихорецк': 'Тихорецкая', 'тихорецкой': 'Тихорецкая', 'тихорецкая': 'Тихорецкая', 'тихорецкую': 'Тихорецкая',
+        'карьер': 'Карьер', 'карьера': 'Карьер', 'карьеру': 'Карьер', 'карьере': 'Карьер',
+        'крд': 'КРД', 'краснодар': 'КРД', 'краснодара': 'КРД', 'краснодаре': 'КРД', 'краснодару': 'КРД', 'краснодарскую': 'КРД',
+        'архип': 'Архип', 'архипа': 'Архип',
+    }
+    def norm_loc(raw):
+        key = raw.strip().lower()
+        if key in LOC_MAP:
+            return LOC_MAP[key]
+        for prefix, name in LOC_MAP.items():
+            if key.startswith(prefix):
+                return name
+        return raw.capitalize()
     from_loc = None
     to_loc = None
     if m_from_to:
-        location_map = {
-            'тихорецкой': 'Тихорецкая', 'тихорецкая': 'Тихорецкая', 'тихорецк': 'Тихорецкая',
-            'карьер': 'Карьер', 'карьера': 'Карьер', 'карьеру': 'Карьер',
-            'крд': 'КРД', 'краснодар': 'КРД',
-        }
-        f_raw = m_from_to.group(1).strip().split()[0]
-        t_raw = m_from_to.group(2).strip().split()[0]
-        from_loc = location_map.get(f_raw, f_raw.capitalize())
-        to_loc = location_map.get(t_raw, t_raw.capitalize())
+        from_loc = norm_loc(m_from_to.group(1))
+        to_loc = norm_loc(m_from_to.group(2))
+    else:
+        m_arrow = re.search(rf'({LOC_PAT})\s*(?:→|->|—|-|на)\s*({LOC_PAT})', t_lo)
+        if m_arrow:
+            from_loc = norm_loc(m_arrow.group(1))
+            to_loc = norm_loc(m_arrow.group(2))
     truck = None
     driver = None
-    m_truck = re.search(r'для\s+(\d{3})\b', t)
+    m_truck = re.search(r'(?:для|машин[а-я]*|на)\s+(\d{3})\b', t_lo)
     if not m_truck:
-        m_truck = re.search(r'(?:машин[а-я]*\s+)?\b(\d{3})\b(?!\s*(?:поддон|подд|пд|шт))', t)
-    if m_truck:
-        truck_num = m_truck.group(1)
-        if truck_num in _TRUCK_TO_DRIVER:
-            truck, driver = _TRUCK_TO_DRIVER[truck_num]
+        for cand in re.findall(r'\b(\d{3})\b', t_lo):
+            if cand in _TRUCK_TO_DRIVER:
+                truck, driver = _TRUCK_TO_DRIVER[cand]
+                break
+    elif m_truck.group(1) in _TRUCK_TO_DRIVER:
+        truck, driver = _TRUCK_TO_DRIVER[m_truck.group(1)]
     date = msg_date or datetime.datetime.now().strftime("%d.%m.%Y")
-    m_date = re.search(r'от\s+(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?', t)
+    m_date = re.search(r'(?:от\s+)?(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?', t_lo)
     if m_date:
         dd = m_date.group(1).zfill(2)
         mm = m_date.group(2).zfill(2)
         yy_raw = m_date.group(3)
-        if yy_raw:
-            yyyy = yy_raw if len(yy_raw) == 4 else f"20{yy_raw}"
-        else:
-            yyyy = datetime.datetime.now().strftime("%Y")
+        yyyy = (yy_raw if (yy_raw and len(yy_raw) == 4)
+                else (f"20{yy_raw}" if yy_raw else datetime.datetime.now().strftime("%Y")))
         date = f"{dd}.{mm}.{yyyy}"
     event = {
         "type": "pallet_transfer",
@@ -2215,6 +2230,85 @@ def _parse_pallet_transfer_fallback(text: str, msg_date: str = "") -> list:
     print(f"[FALLBACK_PARSE] pallet_transfer regex: {event}", flush=True)
     return [event]
 
+def _parse_pallet_return_fallback(text: str, msg_date: str = "") -> list:
+    """Гибкий regex-фолбэк для возвратов поддонов от клиента.
+    Триггер: 'поддон/подд/пд' + (слова возврат/вернул*) + наличие клиента вида 'от ИП X' / 'от ООО X' / 'от Фамилии'."""
+    t = text.strip()
+    t_lo = t.lower()
+    if not re.search(r'(?:поддон|подд|пд)', t_lo):
+        return []
+    if not re.search(r'\b(возврат|вернул[аи]?|вернувш)', t_lo):
+        return []
+    m_pall = re.search(r'(\d{1,4})\s*(?:поддон[а-я]*|подд|пд)\b', t_lo)
+    if not m_pall:
+        return []
+    pallets = int(m_pall.group(1))
+    client = None
+    # 1) от ИП/ООО/АО/ЗАО/ПАО ИмяСобственное
+    m_org = re.search(
+        r'от\s+(ИП|ООО|АО|ЗАО|ПАО)\s+([А-ЯЁA-Z][А-ЯЁа-яёA-Za-z\.\-]+(?:\s+[А-ЯЁA-Z]\.?)*)',
+        text
+    )
+    if m_org:
+        client = f"{m_org.group(1)} {m_org.group(2)}".strip().rstrip(',.;')
+    if not client:
+        # 2) Просто «от Фамилия» (заглавная буква, не дата)
+        for m in re.finditer(r'от\s+([А-ЯЁ][а-яё]{2,}(?:[а-яё]|ых|их|ой|ого|а|у)?)', text):
+            cand = m.group(1).strip()
+            if not re.match(r'^\d', cand):
+                client = cand
+                break
+    if not client:
+        # 3) Без «от» — например «N поддонов вернули от X» — но это уже покрыто; ещё «X вернул N поддонов»
+        m_org2 = re.search(r'(ИП|ООО|АО|ЗАО|ПАО)\s+([А-ЯЁA-Z][А-ЯЁа-яёA-Za-z\.\-]+)', text)
+        if m_org2:
+            client = f"{m_org2.group(1)} {m_org2.group(2)}".strip()
+    if not client:
+        return []
+    date = msg_date or datetime.datetime.now().strftime("%d.%m.%Y")
+    m_date = re.search(r'(?:от\s+)?(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?', t_lo)
+    if m_date:
+        dd = m_date.group(1).zfill(2)
+        mm = m_date.group(2).zfill(2)
+        yy_raw = m_date.group(3)
+        yyyy = (yy_raw if (yy_raw and len(yy_raw) == 4)
+                else (f"20{yy_raw}" if yy_raw else datetime.datetime.now().strftime("%Y")))
+        date = f"{dd}.{mm}.{yyyy}"
+    obj = None
+    m_obj = re.search(r'объект[ы]?\s+([а-яё]+)', t_lo)
+    if not m_obj:
+        m_obj = re.search(r'\bна\s+(склад|карьер|тихорецк[а-яё]*|крд|краснодар[а-яё]*)\b', t_lo)
+    if m_obj:
+        obj = m_obj.group(1).capitalize()
+    truck = None
+    driver = None
+    m_truck = re.search(r'(?:на|машин[а-я]*|для)\s+(\d{3})\b', t_lo)
+    if m_truck and m_truck.group(1) in _TRUCK_TO_DRIVER:
+        truck, driver = _TRUCK_TO_DRIVER[m_truck.group(1)]
+    if not truck:
+        for cand in reversed(re.findall(r'\b(\d{3})\b', t_lo)):
+            if cand in _TRUCK_TO_DRIVER:
+                truck, driver = _TRUCK_TO_DRIVER[cand]
+                break
+    # Тип поддона: «1*» = «Поддон 1*»
+    p_type = "Поддон 1*" if re.search(r'\b1\s*\*', t_lo) else ""
+    event = {
+        "type": "return",
+        "date": date,
+        "client": client,
+        "pallets": pallets,
+        "return_pallets": pallets,
+    }
+    if obj:
+        event["to_location"] = obj
+    if truck:
+        event["truck"] = truck
+    if driver:
+        event["driver"] = driver
+    if p_type:
+        event["pallet_type"] = p_type
+    print(f"[FALLBACK_PARSE] pallet_return regex: {event}", flush=True)
+    return [event]
 
 def _merge_combined_trip_events(events: list) -> list:
     """Страховка от Claude: если он вернул 2+ отдельных trip-события с одинаковыми
@@ -4459,6 +4553,11 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
         fallback_trips = _parse_pallet_transfer_fallback(text, msg_date=_msg_date)
         if fallback_trips:
             print(f"[BLOK_GROUP] AI вернул [], regex-fallback нашёл pallet_transfer: {fallback_trips}", flush=True)
+            trips = fallback_trips
+    if not trips:
+        fallback_trips = _parse_pallet_return_fallback(text, msg_date=_msg_date)
+        if fallback_trips:
+            print(f"[BLOK_GROUP] AI вернул [], regex-fallback нашёл pallet_return: {fallback_trips}", flush=True)
             trips = fallback_trips
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
