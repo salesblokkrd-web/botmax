@@ -2141,12 +2141,18 @@ def _normalize_location_for_dedup(loc: str) -> str:
     return s
 
 
-# Маппинг машин → водители (для fallback парсера перемещений)
-_TRUCK_TO_DRIVER = {
-    "135": ("у135рх 193", "Кораблев М.Н."),
-    "319": ("р319ок 123", "Адлейба А.Ю."),
-    "638": ("р638хн 123", "Кислицин А.С."),
-}
+# Derived из основного TRUCK_TO_DRIVER (90): {короткий_номер: (полный_номер, водитель)}
+# Регенерируется при импорте — добавишь машину в TRUCK_TO_DRIVER и она автоматом появится в fallback.
+def _build_truck_shortcuts():
+    import re as _re
+    result = {}
+    for full, driver in TRUCK_TO_DRIVER.items():
+        m = _re.search(r'(\d{3})', full)
+        if m:
+            result[m.group(1)] = (full, driver)
+    return result
+
+_TRUCK_TO_DRIVER = _build_truck_shortcuts()
 
 
 def _parse_pallet_transfer_fallback(text: str, msg_date: str = "") -> list:
@@ -4400,8 +4406,26 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
     correction_markers = ("поправ", "исправ", "правк", "корректировк", "уточнен", "дополни", "обнови")
     is_correction_msg = any(cm in text_lower for cm in correction_markers)
 
+    # S4: keyword-фильтр переведён в ЛОГИРУЮЩИЙ режим — отсев в файл, но Claude всё равно вызывается.
+    # Раньше тут был silent drop — менеджер ждал ответа, а бот не запускал парсер.
+    # Теперь логируем «подозрительные» сообщения, но шанс на разбор даём.
     if not any(kw in text_lower for kw in keywords) and not is_correction_msg:
-        return  # Не похоже на задание — просто логируем
+        try:
+            silent_file = os.path.join(DATA_DIR, "silent_drops.jsonl")
+            with open(silent_file, "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({
+                    "ts": datetime.datetime.now().isoformat(),
+                    "sender": sender_name,
+                    "text": text[:500],
+                    "reason": "no_keywords_match",
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # Если сообщение слишком короткое (<10 символов) или это явный мусор (одно слово/смайлик) — реально игнорируем
+        if len(text.strip()) < 10:
+            return
+        # Иначе — даём Claude шанс разобрать. +$0.01 за вызов, но не теряем команды.
+        print(f"[BLOK_GROUP] No-keywords пропускаем в Claude: {text[:80]}", flush=True)
 
     # Дедупликация на уровне текста — если ТОЧНО тот же текст уже обработан, не парсим повторно
     # ИСКЛЮЧЕНИЕ: правки (correction) — пропускаем текстовый дедуп
@@ -4438,12 +4462,38 @@ def handle_blok_group_message(sender_name: str, text: str, raw_msg: dict):
             trips = fallback_trips
     if not trips:
         print(f"[BLOK_GROUP] Парсер вернул пустой список для: {text[:60]}", flush=True)
+        # S2: лог parse_failures.jsonl + алерт админу для разбора
+        try:
+            failures_file = os.path.join(DATA_DIR, "parse_failures.jsonl")
+            with open(failures_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": datetime.datetime.now().isoformat(),
+                    "sender": sender_name,
+                    "text": text,
+                    "msg_date": _msg_date,
+                    "fallback_attempted": True,
+                    "reason": "parser_empty",
+                }, ensure_ascii=False) + "\n")
+        except Exception as _le:
+            print(f"[PARSE_FAIL_LOG] {_le}", flush=True)
         # Эвристика: если в тексте несколько маркеров «Закупка <дата>» — это слитное сообщение
         purchase_markers = len(re.findall(r'(?i)\bзакупка\s+\d', text))
         if purchase_markers >= 2:
             send_msg(BLOK_GROUP_ID, "⚠️ Похоже здесь несколько закупок в одном сообщении. Напишите каждую закупку отдельным сообщением, пожалуйста.")
         else:
-            send_msg(BLOK_GROUP_ID, "⚠️ Не удалось разобрать сообщение. Попробуйте переформулировать или отправить каждую операцию отдельным сообщением.")
+            # Подсказка с примерами рабочих формулировок (вместо абстрактного «переформулируйте»)
+            send_msg(BLOK_GROUP_ID, (
+                "⚠️ Не удалось разобрать сообщение. Примеры рабочих формулировок:\n"
+                "• Перемещение поддонов: «Перемещение 200 поддонов с Тихорецкой на Карьер для 135 от 26.05»\n"
+                "• Рейс: «Рейс 26.05 для 135: 15 подд 20(3-0) с КРД на ИП Шубина»\n"
+                "• Возврат: «Возврат от ИП Шубина 20 поддонов от 26.05, машина 135»\n"
+                "• Оплата: «ИП Шубина оплатил 50000 руб наличные»"
+            ))
+            # Алерт админу: повторяющиеся неудачи парсинга = знак для разбора промта
+            try:
+                _alert_admin(f"⚠️ Парсер не разобрал сообщение от {sender_name}:\n«{text[:200]}»\nЛог: {failures_file}", None)
+            except Exception:
+                pass
         return
 
     # Дедупликация — отсекаем повторные сообщения (Светлана повторяет 3-6 раз)
