@@ -3430,20 +3430,46 @@ def _write_trips_to_sheets(trips: list):
     except Exception as e:
         print(f"[BLOK_SHEETS] Ошибка записи: {e}", flush=True)
         _alert_admin("Ошибка записи рейсов в Sheets", e)
+_ORG_PREFIXES = ("ИП ", "ООО ", "ОАО ", "ЗАО ", "АО ", "ПАО ", "НПО ", "ТД ", "КФХ ", "СПК ")
+
+def _normalize_client_name(name: str) -> str:
+    s = (name or "").upper().strip()
+    for ch in ("«", "»", '"', "'", "`"):
+        s = s.replace(ch, "")
+    s = s.strip()
+    changed = True
+    while changed:
+        changed = False
+        for p in _ORG_PREFIXES:
+            if s.startswith(p):
+                s = s[len(p):].strip()
+                changed = True
+            if s.endswith(" " + p.strip()):
+                s = s[:-(len(p.strip())+1)].strip()
+                changed = True
+    return s
+
 def _find_client_worksheet(sh, client_name: str):
-    """Ищет лист клиента: сначала точное совпадение, потом по началу имени.
-    Возвращает worksheet или None."""
-    client_upper = client_name.upper().strip()
-    # 1. Точное совпадение
-    for sheet in sh.worksheets():
-        if sheet.title.upper().strip() == client_upper:
+    """Ищет лист клиента: точное совпадение -> совпадение по началу.
+    Нормализует обе стороны (срезает ИП/ООО/АО/ПАО/ЗАО/ОАО/КФХ/СПК и кавычки),
+    чтобы лист 'Горячкина' находился по запросу 'ИП Горячкина'."""
+    raw = client_name.upper().strip()
+    norm = _normalize_client_name(client_name)
+    if not norm or len(norm) < 3:
+        return None
+    sheets = sh.worksheets()
+    # 1. Точное совпадение нормализованных имён
+    for sheet in sheets:
+        title_norm = _normalize_client_name(sheet.title)
+        if title_norm == norm or sheet.title.upper().strip() == raw:
             return sheet
-    # 2. Совпадение по началу (лист "МЕЛИК" для запроса "МЕЛИК" или "МЕЛИКСЕТЯНТ")
-    for sheet in sh.worksheets():
-        title_up = sheet.title.upper().strip()
-        if title_up.startswith(client_upper) or client_upper.startswith(title_up):
-            # Защита от ложных совпадений: минимум 3 общих символа
-            common_len = min(len(title_up), len(client_upper))
+    # 2. Совпадение по началу (для коротких ключей типа МЕЛИК -> МЕЛИКСЕТЯНТ)
+    for sheet in sheets:
+        title_norm = _normalize_client_name(sheet.title)
+        if not title_norm:
+            continue
+        if title_norm.startswith(norm) or norm.startswith(title_norm):
+            common_len = min(len(title_norm), len(norm))
             if common_len >= 3:
                 return sheet
     return None
