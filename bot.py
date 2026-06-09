@@ -840,6 +840,16 @@ def parse_order(text: str) -> OrderParsed:
         except Exception as e:
             print(f"[GROQ] parse failed: {e}, using regex")
     return parse_order_regex(text)
+_CONTACT_ORG_RE = re.compile(r"^\s*(ИП|ООО|ОАО|ЗАО|АО|ПАО|НПО|ТД|КФХ|СПК)\b", re.IGNORECASE)
+
+def _normalize_contacts(name, company):
+    """Если организация (ООО/ИП/АО...) попала в «Имя», а «Компания» пустая — переносим."""
+    name = (name or "").strip()
+    company = (company or "").strip()
+    if not company and name and _CONTACT_ORG_RE.match(name):
+        company, name = name, ""
+    return (name or None), (company or None)
+
 def parse_contacts_groq(text: str) -> ContactsParsed:
     client = Groq(api_key=GROQ_API_KEY)
     response = client.chat.completions.create(
@@ -848,7 +858,9 @@ def parse_contacts_groq(text: str) -> ContactsParsed:
             {"role": "system", "content": "Ты помощник для извлечения контактных данных. Отвечай ТОЛЬКО валидным JSON без пояснений."},
             {"role": "user", "content": (
                 f"Сообщение: «{text}»\n\n"
-                "Верни JSON: {\"name\": str|null, \"company\": str|null, \"phone\": str|null}"
+                "Верни JSON: {\"name\": str|null, \"company\": str|null, \"phone\": str|null}\n"
+                "Правило: организацию (ООО/ИП/АО/ЗАО/ПАО и т.п.) клади в company, "
+                "а ФИО человека — в name. Не смешивай их."
             )},
         ],
         temperature=0,
@@ -857,7 +869,8 @@ def parse_contacts_groq(text: str) -> ContactsParsed:
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"```[a-z]*\n?", "", raw).strip("` \n")
     data = json.loads(raw)
-    return ContactsParsed(name=data.get("name"), company=data.get("company"), phone=data.get("phone"))
+    name, company = _normalize_contacts(data.get("name"), data.get("company"))
+    return ContactsParsed(name=name, company=company, phone=data.get("phone"))
 # ─── Геокодирование и маршрутизация ───────────────────────────────────────
 
 # Зона обслуживания: bounding box регионов (lat_min, lat_max, lon_min, lon_max)

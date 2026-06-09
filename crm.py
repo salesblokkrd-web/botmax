@@ -394,6 +394,13 @@ def update_status(order_id: str, status_key: str) -> dict:
                 print(f"[CRM] Заявка {order_id} не найдена для смены статуса", flush=True)
                 return result
 
+            # Дубль-нажатие (статус не изменился) — не плодим историю, просто ок
+            current = (ws.cell(row, COL_STATUS).value or "").strip()
+            if current == label:
+                result["ok"] = True
+                result["duplicate"] = True
+                return result
+
             ws.update_cell(row, COL_STATUS, label)
 
             # Реакция менеджера: при первом переходе в «В работе»
