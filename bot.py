@@ -297,6 +297,7 @@ saved_contacts: dict = {}  # chat_id -> {"contact_name": ..., "phone": ..., "add
 user_data: dict = {}    # chat_id -> dict (данные заявки)
 pending_replies: dict = {}  # manager_id -> {"client_id": int, "expires": float, "summary": str}
 order_summaries: dict = {}  # client_id -> краткий саммари заявки для менеджера
+crm_msg_ctx: dict = {}      # order_id -> {mid, text, client_id} для перерисовки кнопок воронки
 pending_voice: dict = {}    # chat_id -> (text, user_name, user_id)
 processed_callbacks: set = set()  # дедупликация нажатий кнопок
 user_chat_map: dict = {}   # user_id -> chat_id (Max: callback не содержит chat_id)
@@ -431,6 +432,7 @@ def save_state():
             "user_data": {str(k): v for k, v in user_data.items()},
             "pending_replies": {str(k): v for k, v in pending_replies.items()},
             "order_summaries": {str(k): v for k, v in order_summaries.items()},
+            "crm_msg_ctx": {str(k): v for k, v in crm_msg_ctx.items()},
             "user_chat_map": {str(k): v for k, v in user_chat_map.items()},
         }
         tmp = STATE_FILE + ".tmp"
@@ -451,6 +453,7 @@ def load_state():
         for k, v in data.get("pending_replies", {}).items():
             pending_replies[int(k)] = v if isinstance(v, dict) else {"client_id": int(v), "expires": 0, "summary": ""}
         order_summaries.update({int(k): v for k, v in data.get("order_summaries", {}).items()})
+        crm_msg_ctx.update({k: v for k, v in data.get("crm_msg_ctx", {}).items()})  # ключи — order_id (строки)
         user_chat_map.update({int(k): v for k, v in data.get("user_chat_map", {}).items()})
         print(f"[STATE] Загружено: {len(user_state)} диалогов, {len(pending_replies)} ожидающих ответов", flush=True)
     except FileNotFoundError:
@@ -1357,12 +1360,14 @@ def finalize(chat_id: int):
     crm_order_id = ""
     if crm and crm.is_available():
         try:
+            # «Товар» = название продукта(ов), не объём (product_str — это объём/саммари)
+            crm_products = " + ".join(i.get("product", "") for i in items) if items else product
             crm_order_id = crm.append_order({
                 "chat_id": chat_id,
                 "name": contact_name,
                 "company": company,
                 "phone": phone,
-                "product": product_str,
+                "product": crm_products,
                 "tons": tons,
                 "delivery": delivery,
                 "address": address if delivery == "Доставка" else "",
@@ -1375,7 +1380,14 @@ def finalize(chat_id: int):
     buttons = [[{"type": "callback", "text": "Ответить клиенту", "payload": f"reply_{chat_id}"}]]
     if crm_order_id:
         buttons += crm.status_buttons(crm_order_id, "new")
-    mgr_result = send_msg(MANAGER_CHAT_ID, "\n".join(mgr), buttons)
+    mgr_text = "\n".join(mgr)
+    mgr_result = send_msg(MANAGER_CHAT_ID, mgr_text, buttons)
+    # MAX в callback не отдаёт mid сообщения — сохраняем его из ответа на отправку,
+    # чтобы при смене статуса перерисовать кнопки воронки на месте.
+    if crm_order_id:
+        mgr_mid = (mgr_result.get("message", {}) or {}).get("body", {}).get("mid", "")
+        if mgr_mid:
+            crm_msg_ctx[crm_order_id] = {"mid": mgr_mid, "text": mgr_text, "client_id": chat_id}
     if mgr_result.get("message"):
         print(f"[FINALIZE] Менеджеру {MANAGER_CHAT_ID} отправлено ✓", flush=True)
     else:
@@ -2099,27 +2111,37 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str, 
             answer_cb(callback_id, "Не удалось обновить статус")
             return
         answer_cb(callback_id, f"Статус: {label}")
-        # Перерисовываем сообщение менеджера: новый статус + новые кнопки
+        # Перерисовываем сообщение менеджера: новый статус + допустимые след. шаги.
+        # mid/текст берём из crm_msg_ctx (сохранены при отправке заявки), т.к. MAX
+        # в callback не отдаёт mid. Фолбэк на orig_msg — если контекст потерян.
         try:
-            body = (kwargs.get("orig_msg") or {}).get("body", {})
-            mid = body.get("mid", "")
-            base_text = body.get("text", "")
+            ctx = crm_msg_ctx.get(order_id) or {}
+            o_body = (kwargs.get("orig_msg") or {}).get("body", {})
+            mid = ctx.get("mid") or o_body.get("mid", "")
+            base_text = ctx.get("text") or o_body.get("text", "")
             marker = "\n\n📊 Статус:"
             cut = base_text.find(marker)
             if cut != -1:
                 base_text = base_text[:cut]
             new_text = base_text + f"\n\n📊 Статус: {label}"
-            # сохраняем кнопку «Ответить клиенту», если была
+            # кнопка «Ответить клиенту» + следующие шаги воронки
             new_buttons = []
-            for att in body.get("attachments", []):
-                if att.get("type") == "inline_keyboard":
-                    for r in att.get("payload", {}).get("buttons", []):
-                        for b in r:
-                            if str(b.get("payload", "")).startswith("reply_"):
-                                new_buttons.append([b])
+            client_id = ctx.get("client_id")
+            if client_id:
+                new_buttons.append([{"type": "callback", "text": "Ответить клиенту",
+                                     "payload": f"reply_{client_id}"}])
+            else:
+                for att in o_body.get("attachments", []):
+                    if att.get("type") == "inline_keyboard":
+                        for r in att.get("payload", {}).get("buttons", []):
+                            for b in r:
+                                if str(b.get("payload", "")).startswith("reply_"):
+                                    new_buttons.append([b])
             new_buttons += crm.status_buttons(order_id, status_key)
             if mid:
                 edit_msg(mid, new_text, new_buttons or None)
+            else:
+                print(f"[CRM] mid не найден для {order_id} — кнопки не перерисованы", flush=True)
         except Exception as e:
             print(f"[CRM] edit после смены статуса не удался: {e}", flush=True)
         # На финале воронки — короткий пинг владельцу
