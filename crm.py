@@ -191,40 +191,62 @@ def _ensure_orders_ws(sh):
     return ws
 
 
+# Раскладка дашборда (0-based строки) — используется и при заполнении, и при оформлении
+_DASH = {
+    "title": 0, "kpi_lbl": 2, "kpi_val": 3,
+    "ch_hdr_sec": 5, "ch_cols": 6, "ch_max": 7, "ch_tg": 8, "ch_total": 9,
+    "stage_sec": 11, "stage_first": 12,
+}
+
 def _build_dashboard(sh):
-    """Лист «Дашборд» — KPI на формулах (без участия кода)."""
+    """Лист «Дашборд» — KPI-карточки, разбивка по каналам (MAX/TG), стадии."""
     try:
         try:
             ws = sh.worksheet(WS_DASH)
         except Exception:
-            ws = sh.add_worksheet(title=WS_DASH, rows=40, cols=4)
+            ws = sh.add_worksheet(title=WS_DASH, rows=40, cols=8)
         q = "'%s'" % WS_ORDERS
-        # Разделитель аргументов «;» — таблица в русской локали (ru_RU).
-        rows = [
-            ["Показатель", "Значение"],
-            ["Всего заявок", "=COUNTA(%s!A2:A)" % q],
-            ["", ""],
-            ["— По стадиям —", ""],
-        ]
+        W = WON_LABEL
+        m = []
+        m.append(["📊 CRM КАРЬЕР · Воронка заявок", "", "", "", "", ""])
+        m.append(["", "", "", "", "", ""])
+        m.append(["Всего заявок", "Закрыто", "Конверсия", "Выручка точная, ₽", "Выручка предв., ₽", "Ср. реакция, мин"])
+        m.append([
+            "=COUNTA(%s!A2:A)" % q,
+            '=COUNTIF(%s!L2:L;"%s")' % (q, W),
+            '=IFERROR(COUNTIF(%s!L2:L;"%s")/COUNTA(%s!A2:A);0)' % (q, W, q),
+            '=SUMIF(%s!L2:L;"%s";%s!O2:O)' % (q, W, q),
+            '=SUMIF(%s!L2:L;"%s";%s!K2:K)' % (q, W, q),
+            "=IFERROR(AVERAGE(%s!V2:V);0)" % q,
+        ])
+        m.append(["", "", "", "", "", ""])
+        m.append(["ПО КАНАЛАМ — какой работает лучше", "", "", "", "", ""])
+        m.append(["Канал", "Заявок", "Закрыто", "Конверсия", "Выручка точная, ₽", ""])
+        for ch in ("MAX-бот", "TG-бот"):
+            m.append([
+                ch,
+                '=COUNTIF(%s!C2:C;"%s")' % (q, ch),
+                '=COUNTIFS(%s!C2:C;"%s";%s!L2:L;"%s")' % (q, ch, q, W),
+                '=IFERROR(COUNTIFS(%s!C2:C;"%s";%s!L2:L;"%s")/COUNTIF(%s!C2:C;"%s");0)' % (q, ch, q, W, q, ch),
+                '=SUMIFS(%s!O2:O;%s!C2:C;"%s";%s!L2:L;"%s")' % (q, q, ch, q, W),
+                "",
+            ])
+        m.append([
+            "ИТОГО",
+            "=COUNTA(%s!A2:A)" % q,
+            '=COUNTIF(%s!L2:L;"%s")' % (q, W),
+            '=IFERROR(COUNTIF(%s!L2:L;"%s")/COUNTA(%s!A2:A);0)' % (q, W, q),
+            '=SUMIF(%s!L2:L;"%s";%s!O2:O)' % (q, W, q),
+            "",
+        ])
+        m.append(["", "", "", "", "", ""])
+        m.append(["ПО СТАДИЯМ ВОРОНКИ", "", "", "", "", ""])
         for key in ["new", "work", "invoice", "prepaid", "postpay", "shipping",
                     "partial", "won", "think", "lost_price", "lost_other"]:
-            label = STATUS_LABELS[key]
-            rows.append([label, '=COUNTIF(%s!L2:L;"%s")' % (q, label)])
-        rows += [
-            ["", ""],
-            ["Выручка точная (закрытые), ₽", '=SUMIF(%s!L2:L;"%s";%s!O2:O)' % (q, WON_LABEL, q)],
-            ["Выручка предв. (закрытые), ₽", '=SUMIF(%s!L2:L;"%s";%s!K2:K)' % (q, WON_LABEL, q)],
-            ["Конверсия в успех",
-             '=IFERROR(COUNTIF(%s!L2:L;"%s")/COUNTA(%s!A2:A);0)' % (q, WON_LABEL, q)],
-            ["Средняя реакция менеджера, мин", "=IFERROR(AVERAGE(%s!V2:V);0)" % q],
-            ["", ""],
-            ["Постоянных клиентов", '=COUNTIF(%s!W2:W;"Постоянный")' % q],
-        ]
-        ws.update("A1", rows, value_input_option="USER_ENTERED")
-        try:
-            ws.format("A1:B1", {"textFormat": {"bold": True}})
-        except Exception:
-            pass
+            lbl = STATUS_LABELS[key]
+            m.append([lbl, '=COUNTIF(%s!L2:L;"%s")' % (q, lbl), "", "", "", ""])
+        ws.batch_clear(["A1:Z60"])
+        ws.update("A1", m, value_input_option="USER_ENTERED")
     except Exception as e:
         print(f"[CRM] Дашборд не создан (не критично): {e}", flush=True)
 
@@ -318,39 +340,111 @@ def format_sheet(sh):
             "rowProperties": {"firstBandColor": WHITE, "secondBandColor": BAND}}}}]})
     except Exception:
         pass
-    # Дашборд: шапка + ширины + рамки
-    try:
-        dws = sh.worksheet(WS_DASH)
-        dsid = dws.id
-        dreq = [
-            {"updateSheetProperties": {
-                "properties": {"sheetId": dsid, "gridProperties": {"frozenRowCount": 1}},
-                "fields": "gridProperties.frozenRowCount"}},
-            {"updateDimensionProperties": {
-                "range": {"sheetId": dsid, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
-                "properties": {"pixelSize": 260}, "fields": "pixelSize"}},
-            {"updateDimensionProperties": {
-                "range": {"sheetId": dsid, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
-                "properties": {"pixelSize": 150}, "fields": "pixelSize"}},
-            {"repeatCell": {
-                "range": {"sheetId": dsid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 2},
-                "cell": {"userEnteredFormat": {
-                    "backgroundColor": HEADER_BG,
-                    "textFormat": {"bold": True, "fontSize": 11, "foregroundColor": WHITE}}},
-                "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
-            {"updateBorders": {
-                "range": {"sheetId": dsid, "startRowIndex": 0, "endRowIndex": 21, "startColumnIndex": 0, "endColumnIndex": 2},
-                "top": {"style": "SOLID_MEDIUM", "color": OUTER},
-                "bottom": {"style": "SOLID_MEDIUM", "color": OUTER},
-                "left": {"style": "SOLID_MEDIUM", "color": OUTER},
-                "right": {"style": "SOLID_MEDIUM", "color": OUTER},
-                "innerHorizontal": {"style": "SOLID", "color": GRID},
-                "innerVertical": {"style": "SOLID", "color": GRID}}},
-        ]
-        sh.batch_update({"requests": dreq})
-    except Exception as e:
-        print(f"[CRM] format_sheet (дашборд) ошибка: {e}", flush=True)
+    _format_dashboard(sh)
     print("[CRM] Оформление таблицы применено", flush=True)
+
+
+def _format_dashboard(sh):
+    """Уникальное оформление дашборда: баннер, KPI-карточки, таблица каналов, тепловая шкала."""
+    NAVY = _rgb(0.11, 0.24, 0.42)     # титул + секции
+    ACCENT = _rgb(0.20, 0.40, 0.62)   # подписи KPI
+    CARD = _rgb(0.95, 0.97, 1.0)      # фон карточек-значений
+    LIGHT = _rgb(0.90, 0.93, 0.97)    # шапка таблицы каналов
+    WHITE = _rgb(1, 1, 1)
+    GRID = _rgb(0.74, 0.78, 0.83)
+    OUTER = _rgb(0.09, 0.20, 0.36)
+    MONEY = '#,##0" ₽"'
+    try:
+        ws = sh.worksheet(WS_DASH)
+    except Exception:
+        return
+    sid = ws.id
+    D = _DASH
+
+    def cell(r0, r1, c0, c1, fmt, fields):
+        return {"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": r0, "endRowIndex": r1,
+                      "startColumnIndex": c0, "endColumnIndex": c1},
+            "cell": {"userEnteredFormat": fmt},
+            "fields": "userEnteredFormat(%s)" % fields}}
+
+    def merge(r0, r1, c0, c1):
+        return {"mergeCells": {"mergeType": "MERGE_ALL",
+                "range": {"sheetId": sid, "startRowIndex": r0, "endRowIndex": r1,
+                          "startColumnIndex": c0, "endColumnIndex": c1}}}
+
+    def borders(r0, r1, c0, c1):
+        return {"updateBorders": {
+            "range": {"sheetId": sid, "startRowIndex": r0, "endRowIndex": r1, "startColumnIndex": c0, "endColumnIndex": c1},
+            "top": {"style": "SOLID_MEDIUM", "color": OUTER}, "bottom": {"style": "SOLID_MEDIUM", "color": OUTER},
+            "left": {"style": "SOLID_MEDIUM", "color": OUTER}, "right": {"style": "SOLID_MEDIUM", "color": OUTER},
+            "innerHorizontal": {"style": "SOLID", "color": GRID}, "innerVertical": {"style": "SOLID", "color": GRID}}}
+
+    req = []
+    # ширины + заморозка + высоты
+    req.append({"updateSheetProperties": {"properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}})
+    for i, w in enumerate([210, 105, 105, 115, 150, 120]):
+        req.append({"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}})
+    for r, h in [(D["title"], 46), (D["kpi_val"], 38)]:
+        req.append({"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "ROWS", "startIndex": r, "endIndex": r + 1}, "properties": {"pixelSize": h}, "fields": "pixelSize"}})
+    # титул-баннер
+    req.append(merge(D["title"], D["title"] + 1, 0, 6))
+    req.append(cell(D["title"], D["title"] + 1, 0, 6,
+                    {"backgroundColor": NAVY, "horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE",
+                     "textFormat": {"bold": True, "fontSize": 15, "foregroundColor": WHITE}},
+                    "backgroundColor,horizontalAlignment,verticalAlignment,textFormat"))
+    # KPI: подписи + значения
+    req.append(cell(D["kpi_lbl"], D["kpi_lbl"] + 1, 0, 6,
+                    {"backgroundColor": ACCENT, "horizontalAlignment": "CENTER", "wrapStrategy": "WRAP",
+                     "textFormat": {"bold": True, "fontSize": 9, "foregroundColor": WHITE}},
+                    "backgroundColor,horizontalAlignment,wrapStrategy,textFormat"))
+    req.append(cell(D["kpi_val"], D["kpi_val"] + 1, 0, 6,
+                    {"backgroundColor": CARD, "horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE",
+                     "textFormat": {"bold": True, "fontSize": 14}},
+                    "backgroundColor,horizontalAlignment,verticalAlignment,textFormat"))
+    # форматы чисел в KPI: конверсия %, выручка ₽, реакция 0.0
+    req.append(cell(D["kpi_val"], D["kpi_val"] + 1, 2, 3, {"numberFormat": {"type": "PERCENT", "pattern": "0%"}}, "numberFormat"))
+    req.append(cell(D["kpi_val"], D["kpi_val"] + 1, 3, 5, {"numberFormat": {"type": "NUMBER", "pattern": MONEY}}, "numberFormat"))
+    req.append(cell(D["kpi_val"], D["kpi_val"] + 1, 5, 6, {"numberFormat": {"type": "NUMBER", "pattern": "0.0"}}, "numberFormat"))
+    req.append(borders(D["kpi_lbl"], D["kpi_val"] + 1, 0, 6))
+    # секции
+    for r in (D["ch_hdr_sec"], D["stage_sec"]):
+        req.append(merge(r, r + 1, 0, 6))
+        req.append(cell(r, r + 1, 0, 6,
+                        {"backgroundColor": NAVY, "horizontalAlignment": "LEFT", "verticalAlignment": "MIDDLE",
+                         "textFormat": {"bold": True, "fontSize": 11, "foregroundColor": WHITE}},
+                        "backgroundColor,horizontalAlignment,verticalAlignment,textFormat"))
+    # таблица каналов: шапка + данные + итог
+    req.append(cell(D["ch_cols"], D["ch_cols"] + 1, 0, 5,
+                    {"backgroundColor": LIGHT, "horizontalAlignment": "CENTER", "textFormat": {"bold": True, "fontSize": 10}},
+                    "backgroundColor,horizontalAlignment,textFormat"))
+    req.append(cell(D["ch_max"], D["ch_total"] + 1, 1, 5, {"horizontalAlignment": "CENTER"}, "horizontalAlignment"))
+    req.append(cell(D["ch_max"], D["ch_total"] + 1, 3, 4, {"numberFormat": {"type": "PERCENT", "pattern": "0%"}}, "numberFormat"))
+    req.append(cell(D["ch_max"], D["ch_total"] + 1, 4, 5, {"numberFormat": {"type": "NUMBER", "pattern": MONEY}}, "numberFormat"))
+    req.append(cell(D["ch_total"], D["ch_total"] + 1, 0, 5, {"textFormat": {"bold": True, "fontSize": 10}}, "textFormat"))
+    req.append(borders(D["ch_cols"], D["ch_total"] + 1, 0, 5))
+    # таблица стадий
+    stage_last = D["stage_first"] + 11
+    req.append(cell(D["stage_first"], stage_last, 1, 2, {"horizontalAlignment": "CENTER"}, "horizontalAlignment"))
+    req.append(borders(D["stage_first"], stage_last, 0, 2))
+    try:
+        sh.batch_update({"requests": req})
+    except Exception as e:
+        print(f"[CRM] _format_dashboard ошибка: {e}", flush=True)
+        return
+    # тепловая шкала по конверсии (KPI + каналы): красный→жёлтый→зелёный
+    try:
+        sh.batch_update({"requests": [{"addConditionalFormatRule": {"index": 0, "rule": {
+            "ranges": [
+                {"sheetId": sid, "startRowIndex": D["kpi_val"], "endRowIndex": D["kpi_val"] + 1, "startColumnIndex": 2, "endColumnIndex": 3},
+                {"sheetId": sid, "startRowIndex": D["ch_max"], "endRowIndex": D["ch_tg"] + 1, "startColumnIndex": 3, "endColumnIndex": 4},
+            ],
+            "gradientRule": {
+                "minpoint": {"color": _rgb(0.96, 0.60, 0.60), "type": "NUMBER", "value": "0"},
+                "midpoint": {"color": _rgb(1.0, 0.90, 0.55), "type": "NUMBER", "value": "0.4"},
+                "maxpoint": {"color": _rgb(0.58, 0.83, 0.58), "type": "NUMBER", "value": "0.8"}}}}}]})
+    except Exception:
+        pass
 
 
 def _create_spreadsheet(gc):
