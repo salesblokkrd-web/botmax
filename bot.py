@@ -24,6 +24,12 @@ except ImportError:
     pallet_handler = None
     print("[INIT] pallet_handler not available", flush=True)
 
+try:
+    import crm
+except Exception as _e:
+    crm = None
+    print(f"[INIT] crm module not available: {_e}", flush=True)
+
 # ─── Конфиг ───────────────────────────────────────────────────────────────
 
 TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
@@ -1347,8 +1353,29 @@ def finalize(chat_id: int):
         product_str = " + ".join(f"{i['product']} {i['tons']}т" for i in items)
     order_summaries[chat_id] = f"{contact_name} | {product_str} | тел: {phone}"
 
-    reply_btn = [[{"type": "callback", "text": "Ответить клиенту", "payload": f"reply_{chat_id}"}]]
-    mgr_result = send_msg(MANAGER_CHAT_ID, "\n".join(mgr), reply_btn)
+    # ── CRM: завести заявку в воронку (не ломает поток при сбое) ────────────
+    crm_order_id = ""
+    if crm and crm.is_available():
+        try:
+            crm_order_id = crm.append_order({
+                "chat_id": chat_id,
+                "name": contact_name,
+                "company": company,
+                "phone": phone,
+                "product": product_str,
+                "tons": tons,
+                "delivery": delivery,
+                "address": address if delivery == "Доставка" else "",
+                "material_cost": material_cost,
+                "delivery_cost": delivery_cost,
+            })
+        except Exception as e:
+            print(f"[CRM] append из finalize не удался: {e}", flush=True)
+
+    buttons = [[{"type": "callback", "text": "Ответить клиенту", "payload": f"reply_{chat_id}"}]]
+    if crm_order_id:
+        buttons += crm.status_buttons(crm_order_id, "new")
+    mgr_result = send_msg(MANAGER_CHAT_ID, "\n".join(mgr), buttons)
     if mgr_result.get("message"):
         print(f"[FINALIZE] Менеджеру {MANAGER_CHAT_ID} отправлено ✓", flush=True)
     else:
@@ -2054,6 +2081,53 @@ def handle_callback(user_id: int, chat_id: int, callback_id: str, payload: str, 
         user_data.pop(chat_id, None)
         save_state()
         send_msg(chat_id, "Хорошо, начнём заново. Напишите что вам нужно или /start")
+        return
+
+    # CRM: смена статуса заявки кнопкой (конечный автомат воронки)
+    if payload.startswith("crm_"):
+        if not crm:
+            answer_cb(callback_id)
+            return
+        try:
+            _, order_id, status_key = payload.split("_", 2)
+        except ValueError:
+            answer_cb(callback_id)
+            return
+        res = crm.update_status(order_id, status_key)
+        label = res.get("label", status_key)
+        if not res.get("ok"):
+            answer_cb(callback_id, "Не удалось обновить статус")
+            return
+        answer_cb(callback_id, f"Статус: {label}")
+        # Перерисовываем сообщение менеджера: новый статус + новые кнопки
+        try:
+            body = (kwargs.get("orig_msg") or {}).get("body", {})
+            mid = body.get("mid", "")
+            base_text = body.get("text", "")
+            marker = "\n\n📊 Статус:"
+            cut = base_text.find(marker)
+            if cut != -1:
+                base_text = base_text[:cut]
+            new_text = base_text + f"\n\n📊 Статус: {label}"
+            # сохраняем кнопку «Ответить клиенту», если была
+            new_buttons = []
+            for att in body.get("attachments", []):
+                if att.get("type") == "inline_keyboard":
+                    for r in att.get("payload", {}).get("buttons", []):
+                        for b in r:
+                            if str(b.get("payload", "")).startswith("reply_"):
+                                new_buttons.append([b])
+            new_buttons += crm.status_buttons(order_id, status_key)
+            if mid:
+                edit_msg(mid, new_text, new_buttons or None)
+        except Exception as e:
+            print(f"[CRM] edit после смены статуса не удался: {e}", flush=True)
+        # На финале воронки — короткий пинг владельцу
+        if res.get("terminal") and OWNER_CHAT_ID:
+            try:
+                send_msg(OWNER_CHAT_ID, f"Заявка {order_id}: {label}")
+            except Exception:
+                pass
         return
 
     # Голоса в опросах
@@ -4827,6 +4901,22 @@ def main():
     report_thread = threading.Thread(target=weekly_report_loop, daemon=True)
     report_thread.start()
     print("[STARTUP] Еженедельный отчёт: воскресенье 20:00 МСК", flush=True)
+
+    # CRM воронка заявок: гарантируем таблицу при старте + ссылка владельцу
+    if crm and crm.is_available():
+        try:
+            crm_url = crm.bootstrap()
+            if crm_url:
+                print(f"[STARTUP] CRM таблица: {crm_url}", flush=True)
+                if OWNER_CHAT_ID:
+                    try:
+                        send_msg(OWNER_CHAT_ID, f"📊 CRM воронка заявок готова:\n{crm_url}")
+                    except Exception:
+                        pass
+            else:
+                print("[STARTUP] CRM bootstrap вернул пусто (см. логи выше)", flush=True)
+        except Exception as e:
+            print(f"[STARTUP] CRM bootstrap ошибка: {e}", flush=True)
 
     # Сбрасываем чекпоинт если GROUP_ID изменился
     _reset_checkpoint_if_needed()
