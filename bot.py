@@ -882,13 +882,34 @@ def _load_local_coords():
 
 LOCAL_COORDS = _load_local_coords()
 
+_LOCALITY_PREFIXES = {
+    "станица", "ст", "хутор", "х", "посёлок", "поселок", "пос", "пгт",
+    "село", "с", "город", "г", "аул", "п", "деревня", "снт", "ст-ца",
+}
+
 def _lookup_local(address: str):
-    """Ищет адрес в словаре известных координат."""
-    addr_lower = address.lower()
-    for name, coords in LOCAL_COORDS.items():
-        if name in addr_lower:
-            print(f"[GEOCODE] LOCAL: '{name}' найдено в '{address}' -> {coords}", flush=True)
-            return coords
+    """Ищет НАСЕЛЁННЫЙ ПУНКТ (локалити) в словаре известных координат.
+
+    Матчим только город/станицу (первый значимый токен), НЕ всю строку —
+    иначе улица «Ленина» совпадёт с одноимённым посёлком и перебьёт город
+    (баг: «Анапа, ул. Ленина 1» уезжал под ст. Павловская).
+    """
+    addr = address.lower().replace(",", " ")
+    toks = [t.strip(". ") for t in addr.split() if t.strip(". ")]
+    if not toks:
+        return None
+    # Если первый токен — тип НП (ст./хутор/...), локалити начинается со следующего
+    base = toks[1:] if (toks[0] in _LOCALITY_PREFIXES and len(toks) > 1) else toks
+    if not base:
+        return None
+    cands = [base[0]]
+    if len(base) > 1:
+        cands.append(f"{base[0]} {base[1]}")  # двухсловные: «красная поляна», «горячий ключ»
+    # Длинные кандидаты приоритетнее (точнее), точное совпадение по ключу словаря
+    for c in sorted(set(cands), key=len, reverse=True):
+        if c in LOCAL_COORDS:
+            print(f"[GEOCODE] LOCAL: локалити '{c}' -> {LOCAL_COORDS[c]}", flush=True)
+            return LOCAL_COORDS[c]
     return None
 
 SERVICE_REGIONS = [
