@@ -42,6 +42,7 @@ STATUS_LABELS = {
     "work":       "⚙️ В работе",
     "invoice":    "📄 Счёт выставлен",
     "prepaid":    "💰 Предоплата получена",
+    "postpay":    "🤝 Оплата по факту",
     "shipping":   "🚚 Отгрузка",
     "partial":    "📦 Частичная отгрузка",
     "won":        "✅ Закрыта-успех",
@@ -58,6 +59,7 @@ BUTTON_TEXT = {
     "work":       "⚙️ Взял в работу",
     "invoice":    "📄 Счёт выставлен",
     "prepaid":    "💰 Предоплата",
+    "postpay":    "🤝 Оплата по факту",
     "shipping":   "🚚 Начать отгрузку",
     "partial":    "📦 Ещё рейс / частично",
     "won":        "✅ Закрыл (привезли)",
@@ -69,13 +71,15 @@ BUTTON_TEXT = {
 # Допустимые переходы из текущего статуса (что показываем Илье кнопками)
 NEXT = {
     "new":        ["work", "lost_other"],
-    "work":       ["invoice", "think", "lost_price", "lost_other"],
-    "invoice":    ["prepaid", "think", "lost_price"],
+    "work":       ["invoice", "prepaid", "postpay", "think", "lost_price"],
+    "invoice":    ["prepaid", "postpay", "think", "lost_price"],
     "prepaid":    ["shipping"],
+    "postpay":    ["shipping"],
     "shipping":   ["partial", "won"],
     "partial":    ["partial", "won"],
     "won":        [],
-    "think":      ["work", "lost_price", "lost_other"],
+    # «Думает» ведёт прямо к оплате (счёт уже мог быть выставлен) — без повторного счёта
+    "think":      ["invoice", "prepaid", "postpay", "lost_price", "lost_other"],
     "lost_price": ["work"],
     "lost_other": [],
 }
@@ -200,8 +204,8 @@ def _build_dashboard(sh):
             ["", ""],
             ["— По стадиям —", ""],
         ]
-        for key in ["new", "work", "invoice", "prepaid", "shipping", "partial",
-                    "won", "think", "lost_price", "lost_other"]:
+        for key in ["new", "work", "invoice", "prepaid", "postpay", "shipping",
+                    "partial", "won", "think", "lost_price", "lost_other"]:
             label = STATUS_LABELS[key]
             rows.append([label, '=COUNTIF(%s!L2:L;"%s")' % (q, label)])
         rows += [
