@@ -229,6 +229,130 @@ def _build_dashboard(sh):
         print(f"[CRM] Дашборд не создан (не критично): {e}", flush=True)
 
 
+def _rgb(r, g, b):
+    return {"red": r, "green": g, "blue": b}
+
+# Ширины колонок (px), индекс = позиция колонки (0..27)
+_COL_WIDTHS = [
+    140, 110, 78, 115, 130, 105, 165, 64, 96, 175, 100, 160, 115, 115, 110,
+    82, 105, 100, 100, 90, 100, 95, 100, 110, 140, 105, 180, 340,
+]
+_MONEY_COLS = [10, 12, 13, 14, 16, 17, 18]  # предв, точн.цена, доставка, точный, сумма счёта, предоплата, остаток
+
+def format_sheet(sh):
+    """Оформляет лист «Заявки» (и «Дашборд») — шапка, рамки, чередование, ширины."""
+    HEADER_BG = _rgb(0.12, 0.29, 0.49)   # тёмно-синяя шапка
+    WHITE = _rgb(1, 1, 1)
+    BAND = _rgb(0.92, 0.95, 0.99)        # светлый фон чётных строк
+    GRID = _rgb(0.74, 0.78, 0.83)        # внутренняя сетка
+    OUTER = _rgb(0.09, 0.20, 0.36)       # рамка по периметру
+    ncols = len(HEADERS)
+    body_rows = 200
+    end_row = body_rows + 1
+    try:
+        ws = sh.worksheet(WS_ORDERS)
+    except Exception:
+        return
+    sid = ws.id
+    req = []
+    # заморозка шапки + 1-й колонки
+    req.append({"updateSheetProperties": {
+        "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 1}},
+        "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"}})
+    # высота шапки (под 2-3 строки)
+    req.append({"updateDimensionProperties": {
+        "range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 0, "endIndex": 1},
+        "properties": {"pixelSize": 54}, "fields": "pixelSize"}})
+    # ширины колонок
+    for i, w in enumerate(_COL_WIDTHS):
+        req.append({"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
+            "properties": {"pixelSize": w}, "fields": "pixelSize"}})
+    # шапка: цвет, белый жирный текст, центр, перенос
+    req.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": ncols},
+        "cell": {"userEnteredFormat": {
+            "backgroundColor": HEADER_BG, "horizontalAlignment": "CENTER",
+            "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP",
+            "textFormat": {"bold": True, "fontSize": 10, "foregroundColor": WHITE}}},
+        "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,wrapStrategy,textFormat)"}})
+    # тело: шрифт, вертикаль по центру, обрезка
+    req.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": 0, "endColumnIndex": ncols},
+        "cell": {"userEnteredFormat": {
+            "verticalAlignment": "MIDDLE", "wrapStrategy": "CLIP",
+            "textFormat": {"fontSize": 10}}},
+        "fields": "userEnteredFormat(verticalAlignment,wrapStrategy,textFormat)"}})
+    # денежные колонки: вправо + формат «# ##0 ₽»
+    for c in _MONEY_COLS:
+        req.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": c, "endColumnIndex": c + 1},
+            "cell": {"userEnteredFormat": {
+                "horizontalAlignment": "RIGHT",
+                "numberFormat": {"type": "NUMBER", "pattern": '#,##0" ₽"'}}},
+            "fields": "userEnteredFormat(horizontalAlignment,numberFormat)"}})
+    # объём + реакция: по центру
+    for c in (7, 21):
+        req.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": c, "endColumnIndex": c + 1},
+            "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+            "fields": "userEnteredFormat.horizontalAlignment"}})
+    # рамки: периметр толстый, внутри сетка
+    req.append({"updateBorders": {
+        "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": end_row, "startColumnIndex": 0, "endColumnIndex": ncols},
+        "top": {"style": "SOLID_MEDIUM", "color": OUTER},
+        "bottom": {"style": "SOLID_MEDIUM", "color": OUTER},
+        "left": {"style": "SOLID_MEDIUM", "color": OUTER},
+        "right": {"style": "SOLID_MEDIUM", "color": OUTER},
+        "innerHorizontal": {"style": "SOLID", "color": GRID},
+        "innerVertical": {"style": "SOLID", "color": GRID}}})
+    try:
+        sh.batch_update({"requests": req})
+    except Exception as e:
+        print(f"[CRM] format_sheet (основное) ошибка: {e}", flush=True)
+        return
+    # чередование строк (banding) — отдельно: при повторе кидает overlap, гасим
+    try:
+        sh.batch_update({"requests": [{"addBanding": {"bandedRange": {
+            "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": end_row, "startColumnIndex": 0, "endColumnIndex": ncols},
+            "rowProperties": {"firstBandColor": WHITE, "secondBandColor": BAND}}}}]})
+    except Exception:
+        pass
+    # Дашборд: шапка + ширины + рамки
+    try:
+        dws = sh.worksheet(WS_DASH)
+        dsid = dws.id
+        dreq = [
+            {"updateSheetProperties": {
+                "properties": {"sheetId": dsid, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount"}},
+            {"updateDimensionProperties": {
+                "range": {"sheetId": dsid, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
+                "properties": {"pixelSize": 260}, "fields": "pixelSize"}},
+            {"updateDimensionProperties": {
+                "range": {"sheetId": dsid, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
+                "properties": {"pixelSize": 150}, "fields": "pixelSize"}},
+            {"repeatCell": {
+                "range": {"sheetId": dsid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 2},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": HEADER_BG,
+                    "textFormat": {"bold": True, "fontSize": 11, "foregroundColor": WHITE}}},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+            {"updateBorders": {
+                "range": {"sheetId": dsid, "startRowIndex": 0, "endRowIndex": 21, "startColumnIndex": 0, "endColumnIndex": 2},
+                "top": {"style": "SOLID_MEDIUM", "color": OUTER},
+                "bottom": {"style": "SOLID_MEDIUM", "color": OUTER},
+                "left": {"style": "SOLID_MEDIUM", "color": OUTER},
+                "right": {"style": "SOLID_MEDIUM", "color": OUTER},
+                "innerHorizontal": {"style": "SOLID", "color": GRID},
+                "innerVertical": {"style": "SOLID", "color": GRID}}},
+        ]
+        sh.batch_update({"requests": dreq})
+    except Exception as e:
+        print(f"[CRM] format_sheet (дашборд) ошибка: {e}", flush=True)
+    print("[CRM] Оформление таблицы применено", flush=True)
+
+
 def _create_spreadsheet(gc):
     sh = gc.create("CRM Заявки — Архиповский карьер")
     for email in CRM_SHARE_EMAILS:
@@ -275,6 +399,10 @@ def bootstrap() -> str:
     with _lock:
         try:
             _get_ws()
+            try:
+                format_sheet(_ws_cache["sh"])
+            except Exception as e:
+                print(f"[CRM] format_sheet при bootstrap: {e}", flush=True)
             return sheet_url()
         except Exception as e:
             print(f"[CRM] bootstrap не удался: {e}", flush=True)
