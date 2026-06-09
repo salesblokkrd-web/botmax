@@ -1430,6 +1430,43 @@ def finalize(chat_id: int):
                 send_photo_msg(OWNER_CHAT_ID, map_url, f"Маршрут: {BASE_NAME} -> {address} (~{distance_km} км)")
             except Exception as e:
                 print(f"[MAP] Ошибка карты владельцу: {e}")
+
+# ─── Ловля точного расчёта из ответа менеджера клиенту ─────────────────────
+def _parse_amount_from_reply(text: str):
+    """Достаёт сумму (₽) из ответа Ильи клиенту. None — если не похоже на цену.
+    Приоритет: число рядом с руб/₽/тыс. Иначе — наибольшее «ценоподобное» число."""
+    if not text or not any(c.isdigit() for c in text):
+        return None
+    t = text.replace(" ", " ").lower()
+
+    def to_int(s, mult=1):
+        digits = re.sub(r"[^\d]", "", s)
+        if not digits or len(digits) > 8:  # >8 цифр — это телефон/мусор, не цена
+            return None
+        v = int(digits) * mult
+        return v if 1000 <= v <= 50_000_000 else None
+
+    cands = []
+    for m in re.finditer(r"(\d[\d\s.,]{1,})\s*(₽|руб[а-я.]*|р\.|тыс[а-я.]*)", t):
+        mult = 1000 if m.group(2).startswith("тыс") else 1
+        v = to_int(m.group(1), mult)
+        if v:
+            cands.append(v)
+    if not cands:  # нет валюты рядом — берём наибольшее ценоподобное число
+        for m in re.findall(r"\d[\d\s.,]*", t):
+            v = to_int(m)
+            if v:
+                cands.append(v)
+    return max(cands) if cands else None
+
+def _latest_order_for_client(client_id):
+    """Последний order_id для данного клиента (по сохранённому контексту)."""
+    best = None
+    for oid, ctx in crm_msg_ctx.items():
+        if ctx.get("client_id") == client_id and (best is None or oid > best):
+            best = oid
+    return best
+
 # ─── Обработка сообщений ──────────────────────────────────────────────────
 
 def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = None):
@@ -1465,7 +1502,18 @@ def handle_message(chat_id: int, text: str, user_name: str = "", user_id: int = 
             return
         try:
             send_msg(client_id, f"Ответ менеджера:\n\n{text}")
-            send_msg(chat_id, f"✅ Ответ отправлен клиенту.")
+            # Ловим точный расчёт из ответа Ильи клиенту → в CRM (считается выручкой)
+            extra = ""
+            if crm and crm.is_available():
+                amount = _parse_amount_from_reply(text)
+                oid = _latest_order_for_client(client_id) if amount else None
+                if amount and oid:
+                    try:
+                        if crm.set_exact_total(oid, amount):
+                            extra = f" 💰 Точный расчёт {amount:,} ₽ записан.".replace(",", " ")
+                    except Exception as e:
+                        print(f"[CRM] set_exact_total из ответа: {e}", flush=True)
+            send_msg(chat_id, f"✅ Ответ отправлен клиенту.{extra}")
             # Считаем время ответа менеджера
             response_mins = None
             try:

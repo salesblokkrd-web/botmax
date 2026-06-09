@@ -87,8 +87,8 @@ NEXT = {
 # ─── Колонки таблицы «Заявки» (порядок = порядок в строке) ───────────────────
 HEADERS = [
     "№ заявки", "Дата/время", "Источник", "Имя", "Компания", "Телефон",
-    "Товар", "Объём (т)", "Получение", "Адрес", "Предв. сумма, ₽",
-    "Статус", "Точная цена материала, ₽", "Стоимость доставки, ₽", "Итог, ₽",
+    "Товар", "Объём (т)", "Получение", "Адрес", "Предв. расчёт, ₽",
+    "Статус", "Точная цена материала, ₽", "Стоимость доставки, ₽", "Точный расчёт, ₽",
     "№ счёта", "Сумма счёта, ₽", "Предоплата, ₽", "Остаток оплаты, ₽",
     "Отгружено", "Осталось отгрузить", "Реакция менеджера, мин", "Тип клиента",
     "Дата след. касания", "Причина отказа", "Дата закрытия", "Комментарий",
@@ -97,7 +97,9 @@ HEADERS = [
 # 1-based индексы часто используемых колонок
 COL_ID = 1
 COL_PHONE = 6
+COL_PRELIM = 11   # Предв. расчёт (авто, бот)
 COL_STATUS = 12
+COL_EXACT = 15    # Точный расчёт (из ответа Ильи клиенту) — считается выручкой
 COL_REACTION = 22
 COL_CLIENT_TYPE = 23
 COL_CLOSED = 26
@@ -179,7 +181,7 @@ def _ensure_orders_ws(sh):
     except Exception:
         ws = sh.add_worksheet(title=WS_ORDERS, rows=1000, cols=len(HEADERS))
     first = ws.row_values(1)
-    if first[:1] != [HEADERS[0]]:
+    if first != HEADERS:  # синхронизируем шапку (в т.ч. при переименовании колонок)
         ws.update("A1", [HEADERS])
         try:
             ws.freeze(rows=1)
@@ -210,7 +212,8 @@ def _build_dashboard(sh):
             rows.append([label, '=COUNTIF(%s!L2:L;"%s")' % (q, label)])
         rows += [
             ["", ""],
-            ["Выручка закрытых, ₽", '=SUMIF(%s!L2:L;"%s";%s!O2:O)' % (q, WON_LABEL, q)],
+            ["Выручка точная (закрытые), ₽", '=SUMIF(%s!L2:L;"%s";%s!O2:O)' % (q, WON_LABEL, q)],
+            ["Выручка предв. (закрытые), ₽", '=SUMIF(%s!L2:L;"%s";%s!K2:K)' % (q, WON_LABEL, q)],
             ["Конверсия в успех",
              '=IFERROR(COUNTIF(%s!L2:L;"%s")/COUNTA(%s!A2:A);0)' % (q, WON_LABEL, q)],
             ["Средняя реакция менеджера, мин", "=IFERROR(AVERAGE(%s!V2:V);0)" % q],
@@ -343,6 +346,25 @@ def append_order(order: dict) -> str:
             print(f"[CRM] Ошибка append_order: {e}", flush=True)
             _ws_cache.clear()  # сбросить кэш — переподключимся в след. раз
             return ""
+
+
+def set_exact_total(order_id: str, amount) -> bool:
+    """Записывает точный расчёт (₽) в колонку «Точный расчёт» — считается выручкой."""
+    if not is_available() or not order_id:
+        return False
+    with _lock:
+        try:
+            ws = _get_ws()
+            row = _find_row(ws, order_id)
+            if not row:
+                return False
+            ws.update_cell(row, COL_EXACT, amount)
+            print(f"[CRM] {order_id}: точный расчёт = {amount}", flush=True)
+            return True
+        except Exception as e:
+            print(f"[CRM] set_exact_total {order_id}: {e}", flush=True)
+            _ws_cache.clear()
+            return False
 
 
 def _find_row(ws, order_id: str) -> int:
